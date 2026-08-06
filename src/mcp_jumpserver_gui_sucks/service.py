@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from . import __version__
 from .auth_refresh import (
     COOKIE_REFRESH_WINDOW_SECONDS,
     TerminalSessionRefreshRequiredError,
@@ -208,6 +209,7 @@ async def build_status_payload() -> dict[str, Any]:
     payload: dict[str, Any] = {
         "checked_at": utc_now(),
         "project": APP_NAME,
+        "version": __version__,
         "paths": build_paths_payload(settings)["resolved"],
         "effective_base_url": settings.base_url
         or (auth_state.base_url if auth_state else None),
