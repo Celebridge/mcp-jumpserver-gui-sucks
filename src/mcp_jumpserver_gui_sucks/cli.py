@@ -5,25 +5,24 @@ import asyncio
 import contextlib
 import json
 import sys
-from typing import Sequence
+from collections.abc import Sequence
 from urllib.parse import urlparse
 
 from .auth_state import AuthState, CookieState
 from .cli_login import run_cli_login
 from .config import Settings
 from .logging_utils import configure_logging
-from .server import run_server
 from .service import (
+    acquire_terminal_session_payload,
     build_paths_payload,
     build_status_payload,
     close_terminal_session_payload,
-    probe_koko_terminal_payload,
-    refresh_terminal_auth_payload,
-    resolve_terminal_target_payload,
-    resize_terminal_session_payload,
-    acquire_terminal_session_payload,
     interrupt_terminal_session_payload,
+    probe_koko_terminal_payload,
     read_terminal_output_payload,
+    refresh_terminal_auth_payload,
+    resize_terminal_session_payload,
+    resolve_terminal_target_payload,
     run_terminal_command_payload,
     send_terminal_input_payload,
 )
@@ -640,6 +639,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_logging(settings.log_level)
     try:
         if args.command in (None, "serve"):
+            from .server import run_server
+
             transport = getattr(args, "transport", "stdio")
             run_server(transport=transport)
             return 0

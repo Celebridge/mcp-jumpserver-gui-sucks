@@ -4,36 +4,35 @@ import asyncio
 import contextlib
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
-
+from .mcp_compat import create_mcp_server
 from .service import (
     acquire_terminal_session_payload,
     build_paths_payload,
     build_status_payload,
     build_terminal_usage_guide_payload,
+    close_terminal_session_payload,
     create_connection_token_payload,
     expire_connection_token_payload,
-    refresh_terminal_auth_payload,
-    get_asset_payload,
     get_asset_access_payload,
+    get_asset_payload,
     get_profile_payload,
     interrupt_terminal_session_payload,
-    list_connection_tokens_payload,
-    list_connect_methods_payload,
     list_assets_payload,
+    list_connect_methods_payload,
+    list_connection_tokens_payload,
     list_nodes_payload,
     list_terminal_sessions_payload,
     probe_koko_terminal_payload,
     read_terminal_output_payload,
-    resolve_terminal_target_payload,
+    refresh_terminal_auth_payload,
     resize_terminal_session_payload,
+    resolve_terminal_target_payload,
     run_terminal_command_payload,
     send_terminal_input_payload,
-    close_terminal_session_payload,
 )
 from .terminal_manager import get_terminal_session_manager
 
-mcp = FastMCP(
+mcp = create_mcp_server(
     name="mcp-jumpserver-gui-sucks",
     instructions=(
         "JumpServer discovery and session-preparation tools backed by persisted "
@@ -45,7 +44,6 @@ mcp = FastMCP(
         "and jms_interrupt_terminal_session when a command needs to be stopped. "
         "Close managed shells with jms_close_terminal_session when the task is done."
     ),
-    json_response=True,
 )
 
 
