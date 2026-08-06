@@ -234,6 +234,7 @@ class KoKoTerminalSession:
             additional_headers={"Cookie": cookie_header},
             open_timeout=self._settings.request_timeout_seconds,
             close_timeout=5,
+            proxy=True if self._settings.use_environment_proxy else None,
         )
         await self._await_connect()
         await self._send_init()

@@ -120,6 +120,7 @@ async def refresh_terminal_cookie_session(
         cookies=cookies,
         timeout=settings.request_timeout_seconds,
         verify=settings.verify_tls,
+        trust_env=settings.use_environment_proxy,
     ) as client:
         response = await client.get(
             f"{cookie_only_state.base_url or settings.base_url}{USER_SESSION_API_PATH}",

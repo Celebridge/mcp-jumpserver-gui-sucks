@@ -190,6 +190,7 @@ class JumpServerCLILogin:
             verify=self._settings.verify_tls,
             headers={"Accept": "application/json"},
             follow_redirects=True,
+            trust_env=self._settings.use_environment_proxy,
         )
         if self._org_id:
             self._client.headers["X-JMS-ORG"] = self._org_id

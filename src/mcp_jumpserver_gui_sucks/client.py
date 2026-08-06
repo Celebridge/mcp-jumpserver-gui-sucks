@@ -112,6 +112,7 @@ class JumpServerClient:
             cookies=self._build_cookies(),
             timeout=self._settings.request_timeout_seconds,
             verify=self._settings.verify_tls,
+            trust_env=self._settings.use_environment_proxy,
         ) as client:
             response = await client.request(
                 method,
@@ -307,6 +308,7 @@ class JumpServerClient:
             cookies=self._build_cookies(),
             timeout=self._settings.request_timeout_seconds,
             verify=self._settings.verify_tls,
+            trust_env=self._settings.use_environment_proxy,
         ) as client:
             response = await client.patch(request_url, headers=request_headers, json={})
 
@@ -339,6 +341,7 @@ class JumpServerClient:
             cookies=self._build_cookies(),
             timeout=self._settings.request_timeout_seconds,
             verify=self._settings.verify_tls,
+            trust_env=self._settings.use_environment_proxy,
         ) as client:
             response = client.request("GET", request_url, headers=request_headers)
 

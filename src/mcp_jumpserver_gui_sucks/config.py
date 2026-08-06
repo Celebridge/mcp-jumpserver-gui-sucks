@@ -14,6 +14,7 @@ STATE_FILE_ENV_NAME = "MCP_JUMPSERVER_GUI_SUCKS_STATE_FILE"
 LOG_LEVEL_ENV_NAME = "MCP_JUMPSERVER_GUI_SUCKS_LOG_LEVEL"
 VERIFY_TLS_ENV_NAME = "MCP_JUMPSERVER_GUI_SUCKS_VERIFY_TLS"
 REQUEST_TIMEOUT_ENV_NAME = "MCP_JUMPSERVER_GUI_SUCKS_REQUEST_TIMEOUT_SECONDS"
+USE_ENV_PROXY_ENV_NAME = "MCP_JUMPSERVER_GUI_SUCKS_USE_ENV_PROXY"
 TERMINAL_IDLE_TIMEOUT_ENV_NAME = "MCP_JUMPSERVER_GUI_SUCKS_TERMINAL_IDLE_TIMEOUT_SECONDS"
 TERMINAL_REAP_INTERVAL_ENV_NAME = "MCP_JUMPSERVER_GUI_SUCKS_TERMINAL_REAP_INTERVAL_SECONDS"
 MAX_TERMINAL_SESSIONS_ENV_NAME = "MCP_JUMPSERVER_GUI_SUCKS_MAX_TERMINAL_SESSIONS"
@@ -58,6 +59,7 @@ class Settings:
     terminal_idle_timeout_seconds: float
     terminal_reap_interval_seconds: float
     max_terminal_sessions: int
+    use_environment_proxy: bool = False
     base_url_env_name: str = BASE_URL_ENV_NAME
     org_id_env_name: str = ORG_ID_ENV_NAME
     state_dir_env_name: str = STATE_DIR_ENV_NAME
@@ -92,6 +94,10 @@ class Settings:
                 os.getenv(REQUEST_TIMEOUT_ENV_NAME, "20"),
                 default=20.0,
                 minimum=1.0,
+            ),
+            use_environment_proxy=parse_bool(
+                os.getenv(USE_ENV_PROXY_ENV_NAME, "false"),
+                default=False,
             ),
             terminal_idle_timeout_seconds=parse_float(
                 os.getenv(TERMINAL_IDLE_TIMEOUT_ENV_NAME, "3600"),

@@ -21,6 +21,7 @@ from .config import (
     STATE_FILE_ENV_NAME,
     TERMINAL_IDLE_TIMEOUT_ENV_NAME,
     TERMINAL_REAP_INTERVAL_ENV_NAME,
+    USE_ENV_PROXY_ENV_NAME,
     VERIFY_TLS_ENV_NAME,
     Settings,
 )
@@ -48,6 +49,7 @@ def build_paths_payload(settings: Settings | None = None) -> dict[str, Any]:
             "state_file": STATE_FILE_ENV_NAME,
             "terminal_idle_timeout_seconds": TERMINAL_IDLE_TIMEOUT_ENV_NAME,
             "terminal_reap_interval_seconds": TERMINAL_REAP_INTERVAL_ENV_NAME,
+            "use_environment_proxy": USE_ENV_PROXY_ENV_NAME,
             "verify_tls": VERIFY_TLS_ENV_NAME,
         },
         "resolved": {
@@ -60,6 +62,7 @@ def build_paths_payload(settings: Settings | None = None) -> dict[str, Any]:
             "state_file": str(resolved.state_file),
             "terminal_idle_timeout_seconds": resolved.terminal_idle_timeout_seconds,
             "terminal_reap_interval_seconds": resolved.terminal_reap_interval_seconds,
+            "use_environment_proxy": resolved.use_environment_proxy,
             "verify_tls": resolved.verify_tls,
         },
     }

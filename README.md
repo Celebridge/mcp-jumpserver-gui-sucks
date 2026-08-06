@@ -134,6 +134,7 @@ tool_timeout_sec = 600.0
 [mcp_servers.mcp-jumpserver-gui-sucks.env]
 MCP_JUMPSERVER_GUI_SUCKS_BASE_URL = "https://jumpserver.example.com"
 MCP_JUMPSERVER_GUI_SUCKS_VERIFY_TLS = "true"
+MCP_JUMPSERVER_GUI_SUCKS_USE_ENV_PROXY = "false"
 MCP_JUMPSERVER_GUI_SUCKS_TERMINAL_IDLE_TIMEOUT_SECONDS = "3600"
 MCP_JUMPSERVER_GUI_SUCKS_TERMINAL_REAP_INTERVAL_SECONDS = "30"
 MCP_JUMPSERVER_GUI_SUCKS_MAX_TERMINAL_SESSIONS = "8"
@@ -159,6 +160,7 @@ This matches the `mcpServers` JSON shape already present in your local `~/.claud
       "env": {
         "MCP_JUMPSERVER_GUI_SUCKS_BASE_URL": "https://jumpserver.example.com",
         "MCP_JUMPSERVER_GUI_SUCKS_VERIFY_TLS": "true",
+        "MCP_JUMPSERVER_GUI_SUCKS_USE_ENV_PROXY": "false",
         "MCP_JUMPSERVER_GUI_SUCKS_TERMINAL_IDLE_TIMEOUT_SECONDS": "3600",
         "MCP_JUMPSERVER_GUI_SUCKS_TERMINAL_REAP_INTERVAL_SECONDS": "30",
         "MCP_JUMPSERVER_GUI_SUCKS_MAX_TERMINAL_SESSIONS": "8"
@@ -177,6 +179,7 @@ The current runtime reads these environment variables:
 - `MCP_JUMPSERVER_GUI_SUCKS_STATE_DIR`
 - `MCP_JUMPSERVER_GUI_SUCKS_STATE_FILE`
 - `MCP_JUMPSERVER_GUI_SUCKS_VERIFY_TLS`
+- `MCP_JUMPSERVER_GUI_SUCKS_USE_ENV_PROXY`
 - `MCP_JUMPSERVER_GUI_SUCKS_LOG_LEVEL`
 - `MCP_JUMPSERVER_GUI_SUCKS_REQUEST_TIMEOUT_SECONDS`
 - `MCP_JUMPSERVER_GUI_SUCKS_TERMINAL_IDLE_TIMEOUT_SECONDS`
@@ -187,6 +190,10 @@ The recommended minimum MCP config is usually:
 
 - `MCP_JUMPSERVER_GUI_SUCKS_BASE_URL`
 - optionally `MCP_JUMPSERVER_GUI_SUCKS_STATE_DIR` or `MCP_JUMPSERVER_GUI_SUCKS_STATE_FILE`
+
+Environment and operating-system proxy discovery is disabled by default so private JumpServer
+hosts are contacted directly. Set `MCP_JUMPSERVER_GUI_SUCKS_USE_ENV_PROXY=true` only when the
+JumpServer deployment is intentionally reached through the configured system proxy.
 
 ## PyPI Release Automation
 
