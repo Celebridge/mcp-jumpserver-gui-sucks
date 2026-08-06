@@ -157,7 +157,7 @@ jobs:
           SHOULD_PUBLISH: ${{ steps.inspect.outputs.should_publish }}
         run: |
           tag="v${PACKAGE_VERSION}"
-          if gh release view "${tag}" >/dev/null 2>&1; then
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             exists=true
           else
             exists=false
@@ -252,11 +252,12 @@ jobs:
           PACKAGE_VERSION: ${{ needs.prepare.outputs.package_version }}
         run: |
           tag="v${PACKAGE_VERSION}"
-          if gh release view "${tag}" >/dev/null 2>&1; then
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             echo "GitHub Release ${tag} already exists; skipping."
             exit 0
           fi
           gh release create "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
             --target "${GITHUB_SHA}" \
             --title "${tag}" \
             --generate-notes
