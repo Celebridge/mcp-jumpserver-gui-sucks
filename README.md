@@ -237,6 +237,8 @@ Its behavior is intentionally:
 - if the version did not change, the workflow skips publishing
 - if the version already exists on PyPI, the workflow skips publishing
 - `workflow_dispatch` can be used to publish the current version manually when it is not yet on PyPI
+- after a successful PyPI publish, the workflow creates a matching `v<version>` GitHub Release with generated notes
+- if PyPI already contains the current version but its GitHub Release is missing, the next workflow run backfills that Release without republishing the package
 
 The publish job uses PyPI Trusted Publishing through GitHub OIDC. Configure PyPI to trust this repository and workflow before expecting the publish step to succeed.
 
@@ -247,7 +249,7 @@ Recommended PyPI trusted publisher settings:
 - workflow file: `.github/workflows/publish-pypi.yml`
 - environment name: `pypi`
 
-After Trusted Publishing is configured once, later pushes to `main` that bump `project.version` in `pyproject.toml` will publish automatically.
+After Trusted Publishing is configured once, later pushes to `main` that bump `project.version` in `pyproject.toml` will publish to PyPI and create the matching GitHub Release automatically.
 
 ## Current CLI Surface
 
