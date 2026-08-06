@@ -3,20 +3,23 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from .auth_state import AuthState
 from .auth_refresh import (
     COOKIE_REFRESH_WINDOW_SECONDS,
     TerminalSessionRefreshRequiredError,
     maybe_refresh_terminal_cookie_session,
 )
+from .auth_state import AuthState
 from .client import JumpServerClient
 from .config import (
     APP_NAME,
     BASE_URL_ENV_NAME,
     LOG_LEVEL_ENV_NAME,
+    MAX_SFTP_SESSIONS_ENV_NAME,
     MAX_TERMINAL_SESSIONS_ENV_NAME,
     ORG_ID_ENV_NAME,
     REQUEST_TIMEOUT_ENV_NAME,
+    SFTP_IDLE_TIMEOUT_ENV_NAME,
+    SFTP_REAP_INTERVAL_ENV_NAME,
     STATE_DIR_ENV_NAME,
     STATE_FILE_ENV_NAME,
     TERMINAL_IDLE_TIMEOUT_ENV_NAME,
@@ -28,6 +31,7 @@ from .config import (
 from .errors import MissingAuthStateError, TargetResolutionError
 from .koko import probe_koko_terminal
 from .session_store import SessionStore
+from .sftp_manager import get_sftp_session_manager
 from .terminal_manager import get_terminal_session_manager
 
 
@@ -42,11 +46,14 @@ def build_paths_payload(settings: Settings | None = None) -> dict[str, Any]:
         "env": {
             "base_url": BASE_URL_ENV_NAME,
             "log_level": LOG_LEVEL_ENV_NAME,
+            "max_sftp_sessions": MAX_SFTP_SESSIONS_ENV_NAME,
             "max_terminal_sessions": MAX_TERMINAL_SESSIONS_ENV_NAME,
             "org_id": ORG_ID_ENV_NAME,
             "request_timeout_seconds": REQUEST_TIMEOUT_ENV_NAME,
             "state_dir": STATE_DIR_ENV_NAME,
             "state_file": STATE_FILE_ENV_NAME,
+            "sftp_idle_timeout_seconds": SFTP_IDLE_TIMEOUT_ENV_NAME,
+            "sftp_reap_interval_seconds": SFTP_REAP_INTERVAL_ENV_NAME,
             "terminal_idle_timeout_seconds": TERMINAL_IDLE_TIMEOUT_ENV_NAME,
             "terminal_reap_interval_seconds": TERMINAL_REAP_INTERVAL_ENV_NAME,
             "use_environment_proxy": USE_ENV_PROXY_ENV_NAME,
@@ -55,11 +62,14 @@ def build_paths_payload(settings: Settings | None = None) -> dict[str, Any]:
         "resolved": {
             "base_url": resolved.base_url or None,
             "log_level": resolved.log_level,
+            "max_sftp_sessions": resolved.max_sftp_sessions,
             "max_terminal_sessions": resolved.max_terminal_sessions,
             "org_id": resolved.org_id or None,
             "request_timeout_seconds": resolved.request_timeout_seconds,
             "state_dir": str(resolved.state_dir),
             "state_file": str(resolved.state_file),
+            "sftp_idle_timeout_seconds": resolved.sftp_idle_timeout_seconds,
+            "sftp_reap_interval_seconds": resolved.sftp_reap_interval_seconds,
             "terminal_idle_timeout_seconds": resolved.terminal_idle_timeout_seconds,
             "terminal_reap_interval_seconds": resolved.terminal_reap_interval_seconds,
             "use_environment_proxy": resolved.use_environment_proxy,
@@ -106,6 +116,43 @@ async def build_terminal_usage_guide_payload() -> dict[str, Any]:
             "terminal_idle_timeout_seconds": settings.terminal_idle_timeout_seconds,
             "terminal_reap_interval_seconds": settings.terminal_reap_interval_seconds,
             "max_terminal_sessions": settings.max_terminal_sessions,
+        },
+        "active_sessions": sessions,
+    }
+
+
+async def build_sftp_usage_guide_payload() -> dict[str, Any]:
+    settings = Settings.from_env()
+    manager = get_sftp_session_manager()
+    await manager.prepare(settings)
+    sessions = await manager.list_sessions()
+    return {
+        "summary": (
+            "Acquire one managed SFTP session per asset/account pair, reuse its handle for file "
+            "operations, and close it explicitly when the task is complete."
+        ),
+        "recommended_order": [
+            "Call jms_status if cookie-backed terminal authentication may be stale.",
+            "Call jms_acquire_sftp_session with the asset and account references.",
+            "Use jms_sftp_list and jms_sftp_stat before modifying remote paths.",
+            "Use jms_sftp_mkdir, jms_sftp_upload, jms_sftp_download, or jms_sftp_rename as needed.",
+            "Call jms_close_sftp_session when the file task is complete.",
+        ],
+        "safety_rules": [
+            "Upload and download refuse destinations observed to exist unless overwrite=true.",
+            (
+                "KoKo has no atomic create-if-absent upload; avoid external concurrent "
+                "writers to the same remote path when overwrite=false."
+            ),
+            "Remote deletion requires confirm=true after human approval of the exact path.",
+            "Directory deletion is recursive in KoKo and additionally requires recursive=true.",
+            "The remote root directory cannot be renamed or deleted.",
+            "Local upload paths are unrestricted and should point to a regular file.",
+        ],
+        "defaults": {
+            "sftp_idle_timeout_seconds": settings.sftp_idle_timeout_seconds,
+            "sftp_reap_interval_seconds": settings.sftp_reap_interval_seconds,
+            "max_sftp_sessions": settings.max_sftp_sessions,
         },
         "active_sessions": sessions,
     }
@@ -162,7 +209,8 @@ async def build_status_payload() -> dict[str, Any]:
         "checked_at": utc_now(),
         "project": APP_NAME,
         "paths": build_paths_payload(settings)["resolved"],
-        "effective_base_url": settings.base_url or (auth_state.base_url if auth_state else None),
+        "effective_base_url": settings.base_url
+        or (auth_state.base_url if auth_state else None),
         "state": store.describe(),
         "authenticated": False,
     }
@@ -179,7 +227,9 @@ async def build_status_payload() -> dict[str, Any]:
             "base_url": auth_state.base_url or None,
             "cookie_names": auth_state.cookie_names(),
             "cookie_refresh_window_seconds": COOKIE_REFRESH_WINDOW_SECONDS,
-            "cookie_session_expires_in_seconds": round(auth_state.session_cookie_expires_in_seconds(), 3)
+            "cookie_session_expires_in_seconds": round(
+                auth_state.session_cookie_expires_in_seconds(), 3
+            )
             if auth_state.session_cookie_expires_in_seconds() is not None
             else None,
             "header_names": auth_state.header_names(),
@@ -213,10 +263,12 @@ async def build_status_payload() -> dict[str, Any]:
                 payload["state"]["header_names"] = auth_state.header_names()
                 refreshed_expires = auth_state.session_cookie_expires_epoch()
                 if refreshed_expires is not None:
-                    payload["state"]["cookie_session_expires_at"] = datetime.fromtimestamp(
-                        refreshed_expires,
-                        tz=UTC,
-                    ).isoformat()
+                    payload["state"]["cookie_session_expires_at"] = (
+                        datetime.fromtimestamp(
+                            refreshed_expires,
+                            tz=UTC,
+                        ).isoformat()
+                    )
                     payload["state"]["cookie_session_expires_in_seconds"] = round(
                         auth_state.session_cookie_expires_in_seconds() or 0.0,
                         3,
@@ -250,9 +302,13 @@ async def build_status_payload() -> dict[str, Any]:
             payload["cookie_session_authenticated"] = False
         else:
             payload["cookie_session_probe"] = cookie_session_payload
-            payload["cookie_session_authenticated"] = bool(cookie_session_payload.get("ok"))
+            payload["cookie_session_authenticated"] = bool(
+                cookie_session_payload.get("ok")
+            )
     else:
-        payload["cookie_session_probe_skipped"] = "No cookie-backed state is currently persisted."
+        payload["cookie_session_probe_skipped"] = (
+            "No cookie-backed state is currently persisted."
+        )
 
     try:
         profile_payload = await client.get_profile()
@@ -295,7 +351,9 @@ def normalize_node_entry(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def normalize_connect_method_entry(protocol: str, raw: dict[str, Any]) -> dict[str, Any]:
+def normalize_connect_method_entry(
+    protocol: str, raw: dict[str, Any]
+) -> dict[str, Any]:
     return {
         "protocol": protocol,
         "component": raw.get("component"),
@@ -320,7 +378,9 @@ def normalize_asset_account_entry(raw: dict[str, Any]) -> dict[str, Any]:
         "has_secret": bool(raw.get("has_secret")),
         "has_username": bool(raw.get("has_username")),
         "actions": actions,
-        "action_values": [item.get("value") for item in actions if isinstance(item, dict)],
+        "action_values": [
+            item.get("value") for item in actions if isinstance(item, dict)
+        ],
     }
 
 
@@ -364,7 +424,9 @@ def normalize_connection_token_entry(raw: dict[str, Any]) -> dict[str, Any]:
         "connect_options": connect_options,
         "protocol": raw.get("protocol"),
         "actions": actions,
-        "action_values": [item.get("value") for item in actions if isinstance(item, dict)],
+        "action_values": [
+            item.get("value") for item in actions if isinstance(item, dict)
+        ],
         "from_ticket": raw.get("from_ticket"),
         "from_ticket_info": from_ticket_info,
         "org_id": raw.get("org_id"),
@@ -391,12 +453,18 @@ def looks_like_uuid(value: str) -> bool:
 
 
 def build_asset_match_values(raw: dict[str, Any]) -> list[str]:
-    return [
+    values = [
         normalize_match_text(raw.get("id")),
         normalize_match_text(raw.get("name")),
         normalize_match_text(raw.get("address")),
         normalize_match_text(raw.get("domain")),
     ]
+    name = normalize_match_text(raw.get("name"))
+    for endpoint in (raw.get("address"), raw.get("domain")):
+        normalized_endpoint = normalize_match_text(endpoint)
+        if name and normalized_endpoint:
+            values.append(f"{name}({normalized_endpoint})")
+    return values
 
 
 def build_account_match_values(raw: dict[str, Any]) -> list[str]:
@@ -444,7 +512,8 @@ def resolve_unique_match(
         candidate
         for candidate in candidates
         if normalized_reference in value_builder(candidate)
-        and normalized_reference in {value for value in value_builder(candidate) if value}
+        and normalized_reference
+        in {value for value in value_builder(candidate) if value}
     ]
     if len(exact_matches) == 1:
         return exact_matches[0], "exact"
@@ -456,7 +525,10 @@ def resolve_unique_match(
     partial_matches = [
         candidate
         for candidate in candidates
-        if any(normalized_reference and normalized_reference in value for value in value_builder(candidate))
+        if any(
+            normalized_reference and normalized_reference in value
+            for value in value_builder(candidate)
+        )
     ]
     if len(partial_matches) == 1:
         return partial_matches[0], "partial"
@@ -489,7 +561,9 @@ async def list_nodes_payload() -> dict[str, Any]:
     settings, _, auth_state = require_auth_state()
     client = JumpServerClient(settings, auth_state)
     raw_nodes = await client.list_nodes_tree()
-    results = [normalize_node_entry(item) for item in raw_nodes if isinstance(item, dict)]
+    results = [
+        normalize_node_entry(item) for item in raw_nodes if isinstance(item, dict)
+    ]
     return {
         "count": len(results),
         "results": results,
@@ -503,7 +577,9 @@ async def list_connect_methods_payload(protocol: str = "") -> dict[str, Any]:
 
     filtered_protocol = protocol.strip().lower()
     protocol_names = sorted(
-        key for key, value in raw_map.items() if isinstance(key, str) and isinstance(value, list)
+        key
+        for key, value in raw_map.items()
+        if isinstance(key, str) and isinstance(value, list)
     )
     if filtered_protocol:
         protocol_names = [name for name in protocol_names if name == filtered_protocol]
@@ -572,7 +648,9 @@ async def get_asset_access_payload(asset_id: str) -> dict[str, Any]:
         ],
         "protocol_count": len(raw_protocols),
         "protocols": [
-            normalize_asset_protocol_entry(item, connect_methods=normalized_connect_methods)
+            normalize_asset_protocol_entry(
+                item, connect_methods=normalized_connect_methods
+            )
             for item in raw_protocols
             if isinstance(item, dict)
         ],
@@ -600,11 +678,15 @@ async def resolve_terminal_target_payload(
             asset_match_strategy = "id"
 
     if not asset_candidates:
-        asset_list_payload = await client.list_assets(asset=asset_ref, limit=100, offset=0)
+        asset_list_payload = await client.list_assets(
+            asset=asset_ref, limit=100, offset=0
+        )
         raw_asset_results = asset_list_payload.get("results")
         if not isinstance(raw_asset_results, list):
             raw_asset_results = []
-        asset_candidates = [item for item in raw_asset_results if isinstance(item, dict)]
+        asset_candidates = [
+            item for item in raw_asset_results if isinstance(item, dict)
+        ]
         if not asset_candidates:
             raise TargetResolutionError(f"No asset matched {asset_ref!r}.")
         resolved_asset, asset_match_strategy = resolve_unique_match(
@@ -710,7 +792,11 @@ async def create_connection_token_payload(
     connect_method: str = "web_cli",
     reusable: bool = False,
 ) -> dict[str, Any]:
-    resolved_asset_id, resolved_account_id, resolved_target = await resolve_terminal_tool_target(
+    (
+        resolved_asset_id,
+        resolved_account_id,
+        resolved_target,
+    ) = await resolve_terminal_tool_target(
         asset_ref=asset_id,
         account_ref=account,
         protocol=protocol,
@@ -754,7 +840,11 @@ async def probe_koko_terminal_payload(
     settings, _, auth_state, terminal_auth = await ensure_terminal_auth_state(
         force_refresh=True,
     )
-    resolved_asset_id, resolved_account_id, resolved_target = await resolve_terminal_tool_target(
+    (
+        resolved_asset_id,
+        resolved_account_id,
+        resolved_target,
+    ) = await resolve_terminal_tool_target(
         asset_ref=asset_id,
         account_ref=account,
         protocol=protocol,
@@ -788,7 +878,11 @@ async def acquire_terminal_session_payload(
     settings, _, auth_state, terminal_auth = await ensure_terminal_auth_state(
         force_refresh=True,
     )
-    resolved_asset_id, resolved_account_id, resolved_target = await resolve_terminal_tool_target(
+    (
+        resolved_asset_id,
+        resolved_account_id,
+        resolved_target,
+    ) = await resolve_terminal_tool_target(
         asset_ref=asset_ref,
         account_ref=account_ref,
         protocol=protocol,
@@ -920,5 +1014,141 @@ async def resize_terminal_session_payload(
 async def close_terminal_session_payload(session_handle: str) -> dict[str, Any]:
     settings = Settings.from_env()
     manager = get_terminal_session_manager()
+    await manager.prepare(settings)
+    return await manager.close_session(session_handle)
+
+
+async def acquire_sftp_session_payload(
+    *,
+    asset_ref: str,
+    account_ref: str = "",
+) -> dict[str, Any]:
+    settings, _, auth_state, terminal_auth = await ensure_terminal_auth_state(
+        force_refresh=True,
+    )
+    (
+        resolved_asset_id,
+        resolved_account_id,
+        resolved_target,
+    ) = await resolve_terminal_tool_target(
+        asset_ref=asset_ref,
+        account_ref=account_ref,
+        protocol="sftp",
+    )
+    manager = get_sftp_session_manager()
+    payload = await manager.open_session(
+        settings,
+        auth_state,
+        asset_id=resolved_asset_id,
+        account=resolved_account_id,
+        reuse_existing=True,
+    )
+    payload["resolved_target"] = resolved_target
+    payload["terminal_auth"] = terminal_auth
+    return payload
+
+
+async def list_sftp_sessions_payload() -> dict[str, Any]:
+    settings = Settings.from_env()
+    manager = get_sftp_session_manager()
+    await manager.prepare(settings)
+    return await manager.list_sessions()
+
+
+async def sftp_stat_payload(*, session_handle: str, path: str) -> dict[str, Any]:
+    settings = Settings.from_env()
+    manager = get_sftp_session_manager()
+    await manager.prepare(settings)
+    return await manager.stat(session_handle, path=path)
+
+
+async def sftp_list_payload(*, session_handle: str, path: str = "/") -> dict[str, Any]:
+    settings = Settings.from_env()
+    manager = get_sftp_session_manager()
+    await manager.prepare(settings)
+    return await manager.list_directory(session_handle, path=path)
+
+
+async def sftp_mkdir_payload(
+    *,
+    session_handle: str,
+    path: str,
+    parents: bool = False,
+) -> dict[str, Any]:
+    settings = Settings.from_env()
+    manager = get_sftp_session_manager()
+    await manager.prepare(settings)
+    return await manager.mkdir(session_handle, path=path, parents=parents)
+
+
+async def sftp_upload_payload(
+    *,
+    session_handle: str,
+    local_path: str,
+    remote_path: str,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    settings = Settings.from_env()
+    manager = get_sftp_session_manager()
+    await manager.prepare(settings)
+    return await manager.upload(
+        session_handle,
+        local_path=local_path,
+        remote_path=remote_path,
+        overwrite=overwrite,
+    )
+
+
+async def sftp_download_payload(
+    *,
+    session_handle: str,
+    remote_path: str,
+    local_path: str,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    settings = Settings.from_env()
+    manager = get_sftp_session_manager()
+    await manager.prepare(settings)
+    return await manager.download(
+        session_handle,
+        remote_path=remote_path,
+        local_path=local_path,
+        overwrite=overwrite,
+    )
+
+
+async def sftp_rename_payload(
+    *,
+    session_handle: str,
+    path: str,
+    new_name: str,
+) -> dict[str, Any]:
+    settings = Settings.from_env()
+    manager = get_sftp_session_manager()
+    await manager.prepare(settings)
+    return await manager.rename(session_handle, path=path, new_name=new_name)
+
+
+async def sftp_delete_payload(
+    *,
+    session_handle: str,
+    path: str,
+    confirm: bool = False,
+    recursive: bool = False,
+) -> dict[str, Any]:
+    settings = Settings.from_env()
+    manager = get_sftp_session_manager()
+    await manager.prepare(settings)
+    return await manager.delete(
+        session_handle,
+        path=path,
+        confirm=confirm,
+        recursive=recursive,
+    )
+
+
+async def close_sftp_session_payload(session_handle: str) -> dict[str, Any]:
+    settings = Settings.from_env()
+    manager = get_sftp_session_manager()
     await manager.prepare(settings)
     return await manager.close_session(session_handle)

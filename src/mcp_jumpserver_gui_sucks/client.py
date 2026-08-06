@@ -149,7 +149,9 @@ class JumpServerClient:
             ) from exc
 
     async def check_session(self) -> dict[str, Any]:
-        payload = await self._request_json("GET", "/api/v1/authentication/user-session/")
+        payload = await self._request_json(
+            "GET", "/api/v1/authentication/user-session/"
+        )
         if not isinstance(payload, dict):
             raise JumpServerAPIError(
                 method="GET",
@@ -312,7 +314,7 @@ class JumpServerClient:
         ) as client:
             response = await client.patch(request_url, headers=request_headers, json={})
 
-        if response.status_code not in {200, 204}:
+        if response.status_code not in {200, 204, 404}:
             detail = None
             try:
                 payload = response.json()

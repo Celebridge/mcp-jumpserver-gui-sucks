@@ -21,6 +21,9 @@ The main CLI and MCP chain is working against a real JumpServer instance:
 - process-local terminal idle reaping and session-cap enforcement
 - explicit cookie-session refresh probing before terminal work
 - a line-oriented CLI shell for non-MCP interactive terminal use
+- managed KoKo elFinder SFTP sessions over port 443
+- remote directory listing, metadata, directory creation, upload, download, rename, and deletion
+- explicit overwrite and recursive-delete safety gates for file operations
 
 The current implementation is usable, but it is not feature-complete yet. The most important known limitation is:
 
@@ -28,14 +31,13 @@ The current implementation is usable, but it is not feature-complete yet. The mo
 
 Terminal-oriented entry points now accept either the concrete JumpServer account ID/alias required by the API or a user-facing account reference such as `root`, `test-root`, or the account username. The MCP resolves that reference to the concrete per-asset account ID before opening terminal sessions or creating connection tokens.
 
-The project does not currently aim to provide file-manager or SFTP coverage.
-
 ## Tracked Project Docs
 
 - [docs/live-instance-recon.md](docs/live-instance-recon.md)
 - [docs/web-terminal-flow.md](docs/web-terminal-flow.md)
 - [docs/auth-state-format.md](docs/auth-state-format.md)
 - [docs/cli-login-flow.md](docs/cli-login-flow.md)
+- [docs/sftp-flow.md](docs/sftp-flow.md)
 
 ## Upstream Reference Repositories
 
@@ -120,6 +122,26 @@ When a coding agent plans to work on one machine for more than one command, the 
 
 This keeps one KoKo shell open per target and avoids leaving many short-lived web-shell records behind in JumpServer.
 
+## Recommended Agent SFTP Workflow
+
+1. Call `jms_sftp_usage_guide`.
+2. Call `jms_acquire_sftp_session` with `asset_ref` and `account_ref`.
+3. Reuse the returned `session_handle` for all file operations on that target.
+4. Call `jms_sftp_list` or `jms_sftp_stat` before modifying remote paths.
+5. Use `jms_sftp_mkdir`, `jms_sftp_upload`, `jms_sftp_download`, or `jms_sftp_rename`.
+6. Call `jms_close_sftp_session` when the task is complete.
+
+SFTP paths are absolute within the virtual root exposed by JumpServer, not necessarily the
+server's operating-system root. For example, if JumpServer maps an account's SFTP root to
+`/tmp`, the MCP path `/project/file.txt` refers to the server path `/tmp/project/file.txt`.
+
+Uploads and downloads refuse destinations that already exist unless `overwrite=true`.
+KoKo's elFinder upload API does not expose an atomic create-if-absent operation, so an
+external client can still create the same remote path between the preflight check and upload.
+Avoid concurrent writers to the same path when `overwrite=false` is relied on as a safety gate.
+Remote deletion requires `confirm=true`. Because KoKo directory deletion is recursive,
+directories additionally require `recursive=true`; it is never enabled by default.
+
 ### Codex (`~/.codex/config.toml`)
 
 This matches the `mcp_servers.*` structure already used in your local `~/.codex/config.toml`:
@@ -138,6 +160,9 @@ MCP_JUMPSERVER_GUI_SUCKS_USE_ENV_PROXY = "false"
 MCP_JUMPSERVER_GUI_SUCKS_TERMINAL_IDLE_TIMEOUT_SECONDS = "3600"
 MCP_JUMPSERVER_GUI_SUCKS_TERMINAL_REAP_INTERVAL_SECONDS = "30"
 MCP_JUMPSERVER_GUI_SUCKS_MAX_TERMINAL_SESSIONS = "8"
+MCP_JUMPSERVER_GUI_SUCKS_SFTP_IDLE_TIMEOUT_SECONDS = "3600"
+MCP_JUMPSERVER_GUI_SUCKS_SFTP_REAP_INTERVAL_SECONDS = "30"
+MCP_JUMPSERVER_GUI_SUCKS_MAX_SFTP_SESSIONS = "4"
 
 # Optional when the default state directory is not desired.
 # MCP_JUMPSERVER_GUI_SUCKS_STATE_DIR = "/Users/alice/Library/Application Support/mcp-jumpserver-gui-sucks"
@@ -163,7 +188,10 @@ This matches the `mcpServers` JSON shape already present in your local `~/.claud
         "MCP_JUMPSERVER_GUI_SUCKS_USE_ENV_PROXY": "false",
         "MCP_JUMPSERVER_GUI_SUCKS_TERMINAL_IDLE_TIMEOUT_SECONDS": "3600",
         "MCP_JUMPSERVER_GUI_SUCKS_TERMINAL_REAP_INTERVAL_SECONDS": "30",
-        "MCP_JUMPSERVER_GUI_SUCKS_MAX_TERMINAL_SESSIONS": "8"
+        "MCP_JUMPSERVER_GUI_SUCKS_MAX_TERMINAL_SESSIONS": "8",
+        "MCP_JUMPSERVER_GUI_SUCKS_SFTP_IDLE_TIMEOUT_SECONDS": "3600",
+        "MCP_JUMPSERVER_GUI_SUCKS_SFTP_REAP_INTERVAL_SECONDS": "30",
+        "MCP_JUMPSERVER_GUI_SUCKS_MAX_SFTP_SESSIONS": "4"
       }
     }
   }
@@ -185,6 +213,9 @@ The current runtime reads these environment variables:
 - `MCP_JUMPSERVER_GUI_SUCKS_TERMINAL_IDLE_TIMEOUT_SECONDS`
 - `MCP_JUMPSERVER_GUI_SUCKS_TERMINAL_REAP_INTERVAL_SECONDS`
 - `MCP_JUMPSERVER_GUI_SUCKS_MAX_TERMINAL_SESSIONS`
+- `MCP_JUMPSERVER_GUI_SUCKS_SFTP_IDLE_TIMEOUT_SECONDS`
+- `MCP_JUMPSERVER_GUI_SUCKS_SFTP_REAP_INTERVAL_SECONDS`
+- `MCP_JUMPSERVER_GUI_SUCKS_MAX_SFTP_SESSIONS`
 
 The recommended minimum MCP config is usually:
 
@@ -237,6 +268,7 @@ After Trusted Publishing is configured once, later pushes to `main` that bump `p
 - `jms_paths`
 - `jms_status`
 - `jms_terminal_usage_guide`
+- `jms_sftp_usage_guide`
 - `jms_profile`
 - `jms_list_nodes`
 - `jms_list_assets`
@@ -257,10 +289,25 @@ After Trusted Publishing is configured once, later pushes to `main` that bump `p
 - `jms_interrupt_terminal_session`
 - `jms_resize_terminal_session`
 - `jms_close_terminal_session`
+- `jms_acquire_sftp_session`
+- `jms_list_sftp_sessions`
+- `jms_sftp_stat`
+- `jms_sftp_list`
+- `jms_sftp_mkdir`
+- `jms_sftp_upload`
+- `jms_sftp_download`
+- `jms_sftp_rename`
+- `jms_sftp_delete`
+- `jms_close_sftp_session`
 
 ## Operational Notes
 
 - Managed terminal sessions are process-local and intended to live only for the MCP server process lifetime.
+- Managed SFTP sessions are process-local, reused by asset/account pair, idle-reaped, and closed when the MCP process exits.
+- Active SFTP operations are excluded from idle reaping, including transfers longer than the configured idle timeout.
+- Terminal output is bounded in memory. Large streams retain their beginning and end and report truncation metadata.
+- `jms_sftp_upload` accepts regular files from any local path; there is no local source-directory allowlist.
+- Never set SFTP deletion flags speculatively. `confirm=true` requires approval of the exact path, and `recursive=true` requires explicit approval of recursive directory deletion.
 - `jms_terminal_usage_guide` returns the preferred terminal workflow for coding agents and should be consulted at the start of terminal-heavy work.
 - `jms_acquire_terminal_session` is the preferred high-level entrypoint for repeated work on one machine because it resolves the target and reuses an existing shell when possible.
 - `jms_run_terminal_command` is the preferred path for short command execution on an already acquired `session_handle`.

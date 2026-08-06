@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import logging
+from contextlib import asynccontextmanager
 from typing import Any
 
 from .mcp_compat import create_mcp_server
 from .service import (
+    acquire_sftp_session_payload,
     acquire_terminal_session_payload,
     build_paths_payload,
+    build_sftp_usage_guide_payload,
     build_status_payload,
     build_terminal_usage_guide_payload,
+    close_sftp_session_payload,
     close_terminal_session_payload,
     create_connection_token_payload,
     expire_connection_token_payload,
@@ -21,6 +25,7 @@ from .service import (
     list_connect_methods_payload,
     list_connection_tokens_payload,
     list_nodes_payload,
+    list_sftp_sessions_payload,
     list_terminal_sessions_payload,
     probe_koko_terminal_payload,
     read_terminal_output_payload,
@@ -29,8 +34,41 @@ from .service import (
     resolve_terminal_target_payload,
     run_terminal_command_payload,
     send_terminal_input_payload,
+    sftp_delete_payload,
+    sftp_download_payload,
+    sftp_list_payload,
+    sftp_mkdir_payload,
+    sftp_rename_payload,
+    sftp_stat_payload,
+    sftp_upload_payload,
 )
+from .sftp_manager import get_sftp_session_manager
 from .terminal_manager import get_terminal_session_manager
+
+LOGGER = logging.getLogger(__name__)
+
+
+async def close_all_managed_sessions() -> None:
+    results = await asyncio.gather(
+        get_terminal_session_manager().close_all_sessions(close_reason="process_exit"),
+        get_sftp_session_manager().close_all_sessions(close_reason="process_exit"),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, BaseException):
+            LOGGER.error(
+                "Managed session cleanup failed during process exit: %s",
+                type(result).__name__,
+            )
+
+
+@asynccontextmanager
+async def managed_session_lifespan(_server: Any):
+    try:
+        yield {}
+    finally:
+        await close_all_managed_sessions()
+
 
 mcp = create_mcp_server(
     name="mcp-jumpserver-gui-sucks",
@@ -42,8 +80,11 @@ mcp = create_mcp_server(
         "Use jms_run_terminal_command for short command execution, "
         "jms_send_terminal_input plus jms_read_terminal_output for shell-style interaction, "
         "and jms_interrupt_terminal_session when a command needs to be stopped. "
-        "Close managed shells with jms_close_terminal_session when the task is done."
+        "Close managed shells with jms_close_terminal_session when the task is done. "
+        "For file work, call jms_sftp_usage_guide, acquire one reusable SFTP session, "
+        "and preserve the explicit overwrite and deletion safety gates."
     ),
+    lifespan=managed_session_lifespan,
 )
 
 
@@ -63,6 +104,12 @@ async def jms_status() -> dict[str, Any]:
 async def jms_terminal_usage_guide() -> dict[str, Any]:
     """Return the recommended terminal workflow for coding agents using this MCP."""
     return await build_terminal_usage_guide_payload()
+
+
+@mcp.tool()
+async def jms_sftp_usage_guide() -> dict[str, Any]:
+    """Return the recommended SFTP workflow and destructive-operation safety rules."""
+    return await build_sftp_usage_guide_payload()
 
 
 @mcp.tool()
@@ -121,7 +168,9 @@ async def jms_resolve_terminal_target(
 
 
 @mcp.tool()
-async def jms_list_connection_tokens(limit: int = 20, offset: int = 0) -> dict[str, Any]:
+async def jms_list_connection_tokens(
+    limit: int = 20, offset: int = 0
+) -> dict[str, Any]:
     """List active connection tokens without exposing the token secret value."""
     return await list_connection_tokens_payload(limit=limit, offset=offset)
 
@@ -288,11 +337,117 @@ async def jms_close_terminal_session(session_handle: str) -> dict[str, Any]:
     return await close_terminal_session_payload(session_handle)
 
 
+@mcp.tool()
+async def jms_acquire_sftp_session(
+    asset_ref: str,
+    account_ref: str = "",
+) -> dict[str, Any]:
+    """Resolve a target and get or reuse one managed KoKo SFTP session."""
+    return await acquire_sftp_session_payload(
+        asset_ref=asset_ref,
+        account_ref=account_ref,
+    )
+
+
+@mcp.tool()
+async def jms_list_sftp_sessions() -> dict[str, Any]:
+    """List active managed KoKo SFTP sessions in the current MCP process."""
+    return await list_sftp_sessions_payload()
+
+
+@mcp.tool()
+async def jms_sftp_stat(session_handle: str, path: str) -> dict[str, Any]:
+    """Return metadata for one absolute remote path."""
+    return await sftp_stat_payload(session_handle=session_handle, path=path)
+
+
+@mcp.tool()
+async def jms_sftp_list(session_handle: str, path: str = "/") -> dict[str, Any]:
+    """List one absolute remote directory path."""
+    return await sftp_list_payload(session_handle=session_handle, path=path)
+
+
+@mcp.tool()
+async def jms_sftp_mkdir(
+    session_handle: str,
+    path: str,
+    parents: bool = False,
+) -> dict[str, Any]:
+    """Create a remote directory, optionally creating missing parents."""
+    return await sftp_mkdir_payload(
+        session_handle=session_handle,
+        path=path,
+        parents=parents,
+    )
+
+
+@mcp.tool()
+async def jms_sftp_upload(
+    session_handle: str,
+    local_path: str,
+    remote_path: str,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Upload a local file; replacing a remote file requires overwrite=true."""
+    return await sftp_upload_payload(
+        session_handle=session_handle,
+        local_path=local_path,
+        remote_path=remote_path,
+        overwrite=overwrite,
+    )
+
+
+@mcp.tool()
+async def jms_sftp_download(
+    session_handle: str,
+    remote_path: str,
+    local_path: str,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Download a remote file; replacing a local file requires overwrite=true."""
+    return await sftp_download_payload(
+        session_handle=session_handle,
+        remote_path=remote_path,
+        local_path=local_path,
+        overwrite=overwrite,
+    )
+
+
+@mcp.tool()
+async def jms_sftp_rename(
+    session_handle: str,
+    path: str,
+    new_name: str,
+) -> dict[str, Any]:
+    """Rename one remote entry without overwriting an existing sibling."""
+    return await sftp_rename_payload(
+        session_handle=session_handle,
+        path=path,
+        new_name=new_name,
+    )
+
+
+@mcp.tool()
+async def jms_sftp_delete(
+    session_handle: str,
+    path: str,
+    confirm: bool = False,
+    recursive: bool = False,
+) -> dict[str, Any]:
+    """Delete an approved path; directories additionally require recursive=true."""
+    return await sftp_delete_payload(
+        session_handle=session_handle,
+        path=path,
+        confirm=confirm,
+        recursive=recursive,
+    )
+
+
+@mcp.tool()
+async def jms_close_sftp_session(session_handle: str) -> dict[str, Any]:
+    """Close one managed KoKo SFTP session and clean up its connection token."""
+    return await close_sftp_session_payload(session_handle)
+
+
 def run_server(*, transport: str = "stdio") -> None:
-    try:
-        mcp.run(transport=transport)
-    finally:
-        with contextlib.suppress(Exception):
-            asyncio.run(
-                get_terminal_session_manager().close_all_sessions(close_reason="process_exit")
-            )
+    mcp.run(transport=transport)

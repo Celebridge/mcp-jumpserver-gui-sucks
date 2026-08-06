@@ -6,6 +6,7 @@ import contextlib
 import json
 import logging
 import re
+from collections import deque
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any
@@ -23,6 +24,9 @@ from .errors import ConfigError, JumpServerAPIError, JumpServerMCPError
 LOGGER = logging.getLogger(__name__)
 KOKO_SUBPROTOCOL = "JMS-KOKO"
 KOKO_WS_PATH = "/koko/ws/terminal/"
+KOKO_MAX_BUFFERED_EVENTS = 4096
+KOKO_MAX_BUFFERED_OUTPUT_BYTES = 8 * 1024 * 1024
+KOKO_MAX_TRANSCRIPT_OUTPUT_BYTES = 8 * 1024 * 1024
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 OSC_ESCAPE_RE = re.compile(r"\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)")
 
@@ -42,13 +46,82 @@ class Transcript:
     close_reason: str = ""
     from_seq: int = 0
     next_seq: int = 0
+    output_truncated: bool = False
+    dropped_output_bytes: int = 0
+    buffer_gap: bool = False
+    dropped_event_count: int = 0
+    max_output_bytes: int = KOKO_MAX_TRANSCRIPT_OUTPUT_BYTES
+    _head_limit_bytes: int = field(init=False, repr=False)
+    _tail_limit_bytes: int = field(init=False, repr=False)
+    _retained_output_bytes: int = field(init=False, default=0, repr=False)
+    _tail_output_bytes: int = field(init=False, default=0, repr=False)
+    _tail_chunks: deque[str] = field(init=False, default_factory=deque, repr=False)
+
+    def __post_init__(self) -> None:
+        self.max_output_bytes = max(2, self.max_output_bytes)
+        self._head_limit_bytes = max(1, self.max_output_bytes // 4)
+        self._tail_limit_bytes = self.max_output_bytes - self._head_limit_bytes
+        initial_chunks = self.text_chunks
+        self.text_chunks = []
+        self.output_truncated = False
+        self.dropped_output_bytes = 0
+        for chunk in initial_chunks:
+            self.append_text(chunk)
 
     def append_text(self, text: str) -> None:
-        if text:
+        if not text:
+            return
+        encoded_size = len(text.encode("utf-8", "replace"))
+        if not self.output_truncated:
             self.text_chunks.append(text)
+            self._retained_output_bytes += encoded_size
+            if self._retained_output_bytes > self.max_output_bytes:
+                self._split_head_and_tail()
+            return
+
+        self._tail_chunks.append(text)
+        self._tail_output_bytes += encoded_size
+        self._trim_tail()
 
     def raw_text(self) -> str:
-        return "".join(self.text_chunks)
+        head = "".join(self.text_chunks)
+        if not self.output_truncated:
+            return head
+        marker = (
+            f"\n[... {self.dropped_output_bytes} output bytes truncated ...]\n"
+        )
+        return head + marker + "".join(self._tail_chunks)
+
+    def _split_head_and_tail(self) -> None:
+        encoded = "".join(self.text_chunks).encode("utf-8", "replace")
+        head = encoded[: self._head_limit_bytes].decode("utf-8", "ignore")
+        tail = encoded[-self._tail_limit_bytes :].decode("utf-8", "ignore")
+        head_bytes = len(head.encode("utf-8"))
+        tail_bytes = len(tail.encode("utf-8"))
+        self.text_chunks = [head] if head else []
+        self._tail_chunks = deque([tail] if tail else [])
+        self._tail_output_bytes = tail_bytes
+        self._retained_output_bytes = head_bytes + tail_bytes
+        self.dropped_output_bytes = max(0, len(encoded) - self._retained_output_bytes)
+        self.output_truncated = True
+
+    def _trim_tail(self) -> None:
+        while self._tail_output_bytes > self._tail_limit_bytes and self._tail_chunks:
+            overflow = self._tail_output_bytes - self._tail_limit_bytes
+            chunk = self._tail_chunks[0]
+            encoded = chunk.encode("utf-8", "replace")
+            if len(encoded) <= overflow:
+                self._tail_chunks.popleft()
+                self._tail_output_bytes -= len(encoded)
+                self.dropped_output_bytes += len(encoded)
+                continue
+            retained = encoded[overflow:].decode("utf-8", "ignore")
+            retained_bytes = len(retained.encode("utf-8"))
+            dropped = len(encoded) - retained_bytes
+            self._tail_chunks[0] = retained
+            self._tail_output_bytes -= dropped
+            self.dropped_output_bytes += dropped
+            break
 
 
 @dataclass(slots=True)
@@ -157,7 +230,10 @@ class KoKoTerminalSession:
         self._cleanup_error = ""
         self._connect_info: dict[str, Any] = {}
         self._condition = asyncio.Condition()
-        self._events: list[BufferedTerminalEvent] = []
+        self._events: deque[BufferedTerminalEvent] = deque()
+        self._buffered_output_bytes = 0
+        self._max_buffered_events = KOKO_MAX_BUFFERED_EVENTS
+        self._max_buffered_output_bytes = KOKO_MAX_BUFFERED_OUTPUT_BYTES
         self._next_seq = 1
         self._connection_closed = False
         self._close_reason = ""
@@ -198,7 +274,7 @@ class KoKoTerminalSession:
         return self._next_seq - 1
 
     def buffered_output_bytes(self) -> int:
-        return sum(len(event.text.encode("utf-8", "replace")) for event in self._events)
+        return self._buffered_output_bytes
 
     async def open(self) -> None:
         if not self._auth_state.has_cookie_auth():
@@ -329,9 +405,32 @@ class KoKoTerminalSession:
             )
 
         async with self._condition:
+            self._truncate_event_output(event)
             self._events.append(event)
+            self._buffered_output_bytes += self._event_output_bytes(event)
+            self._prune_events()
             self._next_seq += 1
             self._condition.notify_all()
+
+    @staticmethod
+    def _event_output_bytes(event: BufferedTerminalEvent) -> int:
+        return len(event.text.encode("utf-8", "replace"))
+
+    def _truncate_event_output(self, event: BufferedTerminalEvent) -> None:
+        encoded = event.text.encode("utf-8", "replace")
+        if len(encoded) > self._max_buffered_output_bytes:
+            event.text = encoded[-self._max_buffered_output_bytes :].decode(
+                "utf-8",
+                "ignore",
+            )
+
+    def _prune_events(self) -> None:
+        while len(self._events) > 1 and (
+            len(self._events) > self._max_buffered_events
+            or self._buffered_output_bytes > self._max_buffered_output_bytes
+        ):
+            dropped = self._events.popleft()
+            self._buffered_output_bytes -= self._event_output_bytes(dropped)
 
     async def _mark_closed(self, close_reason: str) -> None:
         self._connection_closed = True
@@ -366,6 +465,9 @@ class KoKoTerminalSession:
         while True:
             events = await self._events_after(current_seq)
             if events:
+                if events[0].seq > current_seq + 1:
+                    transcript.buffer_gap = True
+                    transcript.dropped_event_count += events[0].seq - current_seq - 1
                 for event in events:
                     transcript.next_seq = event.seq
                     if event.text:
@@ -514,9 +616,15 @@ def extract_between_markers(
         re.DOTALL,
     )
     match = pattern.search(text)
-    if not match:
-        return None, text
-    return int(match.group(2)), match.group(1)
+    if match:
+        return int(match.group(2)), match.group(1)
+
+    # A bounded event buffer may lose the start marker while retaining the unique
+    # end marker. The exit marker is still sufficient to prove command completion.
+    end_match = re.search(rf"{re.escape(end_marker)}:(\d+)", text)
+    if end_match:
+        return int(end_match.group(1)), text[: end_match.start()]
+    return None, text
 
 
 async def probe_koko_terminal(
@@ -640,6 +748,10 @@ async def execute_koko_command(
         result["startup_binary_frame_count"] = startup.binary_frame_count
         result["startup_output_raw"] = startup_raw
         result["startup_output_text"] = strip_ansi_sequences(startup_raw)
+        result["startup_output_truncated"] = startup.output_truncated
+        result["startup_dropped_output_bytes"] = startup.dropped_output_bytes
+        result["startup_buffer_gap"] = startup.buffer_gap
+        result["startup_dropped_event_count"] = startup.dropped_event_count
         prompt_text = detect_shell_prompt(result["startup_output_text"])
         result["shell_prompt"] = prompt_text
 
@@ -670,6 +782,10 @@ async def execute_koko_command(
         )
         result["idle_timeout"] = command_transcript.idle_timeout
         result["connection_closed"] = command_transcript.connection_closed
+        result["output_truncated"] = command_transcript.output_truncated
+        result["dropped_output_bytes"] = command_transcript.dropped_output_bytes
+        result["buffer_gap"] = command_transcript.buffer_gap
+        result["dropped_event_count"] = command_transcript.dropped_event_count
         if command_transcript.close_reason:
             result["close_reason"] = command_transcript.close_reason
         if session.terminal_id:

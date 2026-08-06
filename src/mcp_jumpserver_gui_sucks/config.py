@@ -15,9 +15,16 @@ LOG_LEVEL_ENV_NAME = "MCP_JUMPSERVER_GUI_SUCKS_LOG_LEVEL"
 VERIFY_TLS_ENV_NAME = "MCP_JUMPSERVER_GUI_SUCKS_VERIFY_TLS"
 REQUEST_TIMEOUT_ENV_NAME = "MCP_JUMPSERVER_GUI_SUCKS_REQUEST_TIMEOUT_SECONDS"
 USE_ENV_PROXY_ENV_NAME = "MCP_JUMPSERVER_GUI_SUCKS_USE_ENV_PROXY"
-TERMINAL_IDLE_TIMEOUT_ENV_NAME = "MCP_JUMPSERVER_GUI_SUCKS_TERMINAL_IDLE_TIMEOUT_SECONDS"
-TERMINAL_REAP_INTERVAL_ENV_NAME = "MCP_JUMPSERVER_GUI_SUCKS_TERMINAL_REAP_INTERVAL_SECONDS"
+TERMINAL_IDLE_TIMEOUT_ENV_NAME = (
+    "MCP_JUMPSERVER_GUI_SUCKS_TERMINAL_IDLE_TIMEOUT_SECONDS"
+)
+TERMINAL_REAP_INTERVAL_ENV_NAME = (
+    "MCP_JUMPSERVER_GUI_SUCKS_TERMINAL_REAP_INTERVAL_SECONDS"
+)
 MAX_TERMINAL_SESSIONS_ENV_NAME = "MCP_JUMPSERVER_GUI_SUCKS_MAX_TERMINAL_SESSIONS"
+SFTP_IDLE_TIMEOUT_ENV_NAME = "MCP_JUMPSERVER_GUI_SUCKS_SFTP_IDLE_TIMEOUT_SECONDS"
+SFTP_REAP_INTERVAL_ENV_NAME = "MCP_JUMPSERVER_GUI_SUCKS_SFTP_REAP_INTERVAL_SECONDS"
+MAX_SFTP_SESSIONS_ENV_NAME = "MCP_JUMPSERVER_GUI_SUCKS_MAX_SFTP_SESSIONS"
 
 
 def parse_bool(raw: str, *, default: bool) -> bool:
@@ -60,6 +67,9 @@ class Settings:
     terminal_reap_interval_seconds: float
     max_terminal_sessions: int
     use_environment_proxy: bool = False
+    sftp_idle_timeout_seconds: float = 3600.0
+    sftp_reap_interval_seconds: float = 30.0
+    max_sftp_sessions: int = 4
     base_url_env_name: str = BASE_URL_ENV_NAME
     org_id_env_name: str = ORG_ID_ENV_NAME
     state_dir_env_name: str = STATE_DIR_ENV_NAME
@@ -112,6 +122,21 @@ class Settings:
             max_terminal_sessions=parse_int(
                 os.getenv(MAX_TERMINAL_SESSIONS_ENV_NAME, "8"),
                 default=8,
+                minimum=1,
+            ),
+            sftp_idle_timeout_seconds=parse_float(
+                os.getenv(SFTP_IDLE_TIMEOUT_ENV_NAME, "3600"),
+                default=3600.0,
+                minimum=1.0,
+            ),
+            sftp_reap_interval_seconds=parse_float(
+                os.getenv(SFTP_REAP_INTERVAL_ENV_NAME, "30"),
+                default=30.0,
+                minimum=1.0,
+            ),
+            max_sftp_sessions=parse_int(
+                os.getenv(MAX_SFTP_SESSIONS_ENV_NAME, "4"),
+                default=4,
                 minimum=1,
             ),
         )

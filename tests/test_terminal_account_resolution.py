@@ -12,6 +12,23 @@ from mcp_jumpserver_gui_sucks.terminal_manager import TerminalSessionManager
 
 
 class TerminalAccountResolutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_asset_resolution_accepts_jumpserver_name_address_display(self) -> None:
+        asset = {
+            "id": "asset-uuid",
+            "name": "192.168.15.70-test-data-01",
+            "address": "192.168.15.70",
+        }
+
+        resolved, strategy = service.resolve_unique_match(
+            reference="192.168.15.70-test-data-01(192.168.15.70)",
+            candidates=[asset],
+            value_builder=service.build_asset_match_values,
+            label="asset",
+        )
+
+        self.assertIs(resolved, asset)
+        self.assertEqual(strategy, "exact")
+
     async def test_create_connection_token_payload_resolves_account_reference(self) -> None:
         resolved_target = {
             "asset": {"id": "asset-uuid", "name": "test-asset"},

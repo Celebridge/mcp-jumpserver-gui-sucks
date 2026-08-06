@@ -72,6 +72,15 @@
 - Logs must be sanitized by default and must never print secrets, cookies, tokens, or OTP values.
 - Record meaningful state transitions, branch choices, failure reasons, and high-value server responses. Avoid noisy logs with little diagnostic value.
 
+## SFTP Requirements
+
+- SFTP support must remain 443-only and use KoKo's authenticated elFinder WebSocket and connector flow rather than connecting to an asset's SSH/SFTP port directly.
+- Remote paths are absolute within the virtual SFTP root exposed by JumpServer. Do not assume that this root is the operating-system `/` directory.
+- Local upload source paths are unrestricted, but the source must be a regular file.
+- Upload and download overwrite behavior must remain opt-in.
+- Remote deletion must require explicit confirmation. Directory deletion must additionally require an explicit recursive opt-in because KoKo recursively removes directories.
+- Managed SFTP sessions should be reused per asset/account pair, idle-reaped, manually closable, and closed when the MCP process exits.
+
 ## Directory Conventions
 
 - `extern/`: upstream reference code, not part of the tracked implementation
