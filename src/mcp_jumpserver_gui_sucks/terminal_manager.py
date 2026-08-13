@@ -4,6 +4,7 @@ import asyncio
 import atexit
 import contextlib
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from time import monotonic
@@ -19,12 +20,19 @@ from .koko import (
     build_exec_script,
     detect_shell_prompt,
     extract_between_markers,
+    extract_terminal_identity,
     normalize_terminal_text,
     strip_ansi_sequences,
     strip_shell_prompt,
 )
 
 LOGGER = logging.getLogger(__name__)
+
+REMOTE_USERNAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}\$?$")
+PASSWORD_PROMPT_RE = re.compile(
+    r"(?:password|passphrase|\u5bc6\u7801|\u53e3\u4ee4)[^\r\n]*[:\uff1a]\s*$",
+    re.IGNORECASE,
+)
 
 
 def utc_now() -> str:
@@ -43,6 +51,30 @@ def normalize_interrupt_signal(signal: str) -> str:
         raise KoKoProbeError(f"Unsupported interrupt signal: {signal!r}") from exc
 
 
+def normalize_user_switch_method(method: str) -> str:
+    normalized = method.strip().lower()
+    if normalized not in {"sudo", "su"}:
+        raise KoKoProbeError(
+            f"Unsupported user switch method: {method!r}. Use 'sudo' or 'su'."
+        )
+    return normalized
+
+
+def validate_remote_username(username: str) -> str:
+    normalized = username.strip()
+    if not REMOTE_USERNAME_RE.fullmatch(normalized):
+        raise KoKoProbeError(
+            "The target user must be a simple Unix username containing only letters, "
+            "digits, underscores, dots, hyphens, and an optional trailing dollar sign."
+        )
+    return normalized
+
+
+def validate_switch_password(password: str) -> None:
+    if any(character in password for character in ("\n", "\r", "\x00")):
+        raise KoKoProbeError("The user switch password must be a single line.")
+
+
 @dataclass(slots=True)
 class ManagedTerminalSession:
     handle: str
@@ -55,6 +87,9 @@ class ManagedTerminalSession:
     rows: int
     idle_timeout_seconds: float
     shell_prompt: str = ""
+    current_identity: dict[str, Any] = field(default_factory=dict)
+    identity_verified_at: str = ""
+    user_switch_stack: list[dict[str, Any]] = field(default_factory=list, repr=False)
     created_at: str = field(default_factory=utc_now)
     last_activity_at: str = field(default_factory=utc_now)
     last_output_at: str = ""
@@ -120,6 +155,9 @@ class ManagedTerminalSession:
             "idle_seconds": round(idle_seconds, 3),
             "expires_in_seconds": round(expires_in_seconds, 3),
             "shell_prompt": self.shell_prompt or None,
+            "current_identity": self.current_identity or None,
+            "identity_verified_at": self.identity_verified_at or None,
+            "user_switch_depth": len(self.user_switch_stack),
             "status": self.status,
             "current_command_id": self.current_command_id or None,
             "current_command_started_at": self.current_command_started_at or None,
@@ -324,10 +362,10 @@ class TerminalSessionManager:
         if append_newline:
             data = f"{data}\n"
         async with session._lock:
-            if session.status == "command_running":
+            if session.status != "idle":
                 raise KoKoProbeError(
-                    "The managed terminal session is currently running a command. "
-                    "Read output or interrupt it before sending more input."
+                    f"The managed terminal session is busy ({session.status}). "
+                    "Wait for it to become idle or interrupt it before sending input."
                 )
             await session.terminal.send_terminal_data(data)
             session.pending_inputs.append(normalize_terminal_text(data))
@@ -424,23 +462,31 @@ class TerminalSessionManager:
         command_id = uuid4().hex
         start_marker = f"__MCP_JMS_COMMAND_START_{uuid4().hex}__"
         end_marker = f"__MCP_JMS_EXIT_STATUS_{uuid4().hex}__"
+        identity_marker = f"__MCP_JMS_IDENTITY_{uuid4().hex}__"
         result: dict[str, Any] = {
             "command": command,
             "command_id": command_id,
             "command_completed": False,
             "timed_out": False,
             "exit_status": None,
+            "identity_verified": False,
             "session_handle": session_handle,
             "max_terminal_sessions": self._max_sessions,
         }
         async with session._lock:
-            if session.status == "command_running":
+            if session.status != "idle":
                 raise KoKoProbeError(
-                    "The managed terminal session is already running a command. "
-                    "Read the current output or interrupt it before starting another command."
+                    f"The managed terminal session is busy ({session.status}). "
+                    "Wait for it to become idle or interrupt it before starting another command."
                 )
             before_seq = session.terminal.current_seq()
-            script = build_exec_script(command, start_marker, end_marker, exit_shell=False)
+            script = build_exec_script(
+                command,
+                start_marker,
+                end_marker,
+                identity_marker=identity_marker,
+                exit_shell=False,
+            )
             await session.terminal.send_terminal_data(script)
             session.pending_inputs.append(normalize_terminal_text(script))
             session.start_command(command_id)
@@ -453,6 +499,10 @@ class TerminalSessionManager:
             )
             command_raw = normalize_terminal_text(transcript.raw_text())
             command_text = strip_ansi_sequences(command_raw)
+            current_identity, command_text = extract_terminal_identity(
+                command_text,
+                marker=identity_marker,
+            )
             exit_status, command_without_markers = extract_between_markers(
                 command_text,
                 start_marker=start_marker,
@@ -462,6 +512,9 @@ class TerminalSessionManager:
             async with session._lock:
                 if detected_prompt:
                     session.shell_prompt = detected_prompt
+                if current_identity is not None:
+                    session.current_identity = current_identity
+                    session.identity_verified_at = utc_now()
                 session.touch_output()
                 if transcript.next_seq:
                     session.last_read_seq = transcript.next_seq
@@ -480,6 +533,7 @@ class TerminalSessionManager:
                         "timed_out": not command_completed
                         and not transcript.connection_closed,
                         "exit_status": exit_status,
+                        "identity_verified": current_identity is not None,
                         "idle_timeout": transcript.idle_timeout,
                         "connection_closed": transcript.connection_closed,
                         "command_control_types": transcript.control_types,
@@ -524,6 +578,300 @@ class TerminalSessionManager:
             result["timed_out"],
         )
         return result
+
+    async def get_identity(
+        self,
+        session_handle: str,
+        *,
+        settle_timeout_seconds: float = 1.0,
+        total_timeout_seconds: float = 10.0,
+    ) -> dict[str, Any]:
+        probe = await self.run_command(
+            session_handle,
+            command=":",
+            settle_timeout_seconds=settle_timeout_seconds,
+            total_timeout_seconds=total_timeout_seconds,
+        )
+        identity = probe.get("current_identity")
+        if (
+            not probe.get("command_completed")
+            or not probe.get("identity_verified")
+            or not isinstance(identity, dict)
+        ):
+            raise KoKoProbeError(
+                "The managed terminal did not return a verifiable remote identity."
+            )
+        session = await self._require_session(session_handle)
+        async with session._lock:
+            snapshot = session.snapshot()
+        return {
+            "identity_verified": True,
+            "session_handle": session_handle,
+            **snapshot,
+        }
+
+    async def switch_user(
+        self,
+        session_handle: str,
+        *,
+        target_user: str,
+        method: str = "sudo",
+        password: str = "",
+        settle_timeout_seconds: float = 1.0,
+        total_timeout_seconds: float = 10.0,
+    ) -> dict[str, Any]:
+        normalized_user = validate_remote_username(target_user)
+        normalized_method = normalize_user_switch_method(method)
+        validate_switch_password(password)
+        before = await self.get_identity(
+            session_handle,
+            settle_timeout_seconds=settle_timeout_seconds,
+            total_timeout_seconds=total_timeout_seconds,
+        )
+        previous_identity = dict(before["current_identity"])
+        if previous_identity.get("user") == normalized_user:
+            return {
+                "switched": False,
+                "already_active": True,
+                "method": normalized_method,
+                "password_supplied": bool(password),
+                "previous_identity": previous_identity,
+                **before,
+            }
+
+        transition_result: dict[str, Any] = {}
+        if not password:
+            if normalized_method == "sudo":
+                transition_result = await self.run_command(
+                    session_handle,
+                    command=f"sudo -n -iu {normalized_user}",
+                    settle_timeout_seconds=settle_timeout_seconds,
+                    total_timeout_seconds=total_timeout_seconds,
+                )
+            elif previous_identity.get("uid") == 0:
+                transition_result = await self.run_command(
+                    session_handle,
+                    command=f"su - {normalized_user}",
+                    settle_timeout_seconds=settle_timeout_seconds,
+                    total_timeout_seconds=total_timeout_seconds,
+                )
+            else:
+                raise KoKoProbeError(
+                    "Switching users with su from a non-root shell requires password."
+                )
+        else:
+            await self._run_password_user_transition(
+                session_handle,
+                target_user=normalized_user,
+                method=normalized_method,
+                password=password,
+                settle_timeout_seconds=settle_timeout_seconds,
+                total_timeout_seconds=total_timeout_seconds,
+            )
+
+        after = await self.get_identity(
+            session_handle,
+            settle_timeout_seconds=settle_timeout_seconds,
+            total_timeout_seconds=total_timeout_seconds,
+        )
+        current_identity = dict(after["current_identity"])
+        if current_identity.get("user") != normalized_user:
+            detail = str(transition_result.get("command_stdout_text") or "").strip()
+            if len(detail) > 500:
+                detail = detail[-500:]
+            suffix = f" Remote output: {detail}" if detail else ""
+            raise KoKoProbeError(
+                f"The remote shell remained user {current_identity.get('user')!r}; "
+                f"switch to {normalized_user!r} failed.{suffix}"
+            )
+
+        session = await self._require_session(session_handle)
+        async with session._lock:
+            session.user_switch_stack.append(
+                {
+                    "from_identity": previous_identity,
+                    "to_identity": current_identity,
+                    "method": normalized_method,
+                    "switched_at": utc_now(),
+                }
+            )
+            snapshot = session.snapshot()
+        LOGGER.info(
+            "Switched managed KoKo terminal session %s to remote user %s using %s.",
+            session_handle,
+            normalized_user,
+            normalized_method,
+        )
+        return {
+            "switched": True,
+            "already_active": False,
+            "method": normalized_method,
+            "password_supplied": bool(password),
+            "previous_identity": previous_identity,
+            **snapshot,
+        }
+
+    async def _run_password_user_transition(
+        self,
+        session_handle: str,
+        *,
+        target_user: str,
+        method: str,
+        password: str,
+        settle_timeout_seconds: float,
+        total_timeout_seconds: float,
+    ) -> None:
+        session = await self._require_session(session_handle)
+        password_prompt = f"__MCP_JMS_PASSWORD_{uuid4().hex}__"
+        if method == "sudo":
+            command = f"sudo -S -p {password_prompt} -iu {target_user}\n"
+        else:
+            command = f"su - {target_user}\n"
+
+        async with session._lock:
+            if session.status != "idle":
+                raise KoKoProbeError(
+                    "The managed terminal session is busy and cannot switch users."
+                )
+            before_seq = session.terminal.current_seq()
+            await session.terminal.send_terminal_data(command)
+            session.status = "user_switch"
+            session.touch()
+
+        latest_seq = before_seq
+        try:
+            first = await session.terminal.drain_until_idle(
+                after_seq=before_seq,
+                idle_timeout_seconds=settle_timeout_seconds,
+                total_timeout_seconds=total_timeout_seconds,
+            )
+            latest_seq = first.next_seq
+            first_text = strip_ansi_sequences(
+                normalize_terminal_text(first.raw_text())
+            )
+            prompt_seen = (
+                password_prompt in first_text
+                if method == "sudo"
+                else PASSWORD_PROMPT_RE.search(first_text) is not None
+            )
+            if prompt_seen:
+                async with session._lock:
+                    await session.terminal.send_terminal_data(f"{password}\n")
+                    session.touch()
+                second = await session.terminal.drain_until_idle(
+                    after_seq=first.next_seq,
+                    idle_timeout_seconds=settle_timeout_seconds,
+                    total_timeout_seconds=total_timeout_seconds,
+                )
+                latest_seq = second.next_seq
+                second_text = strip_ansi_sequences(
+                    normalize_terminal_text(second.raw_text())
+                )
+                prompt_repeated = (
+                    password_prompt in second_text
+                    if method == "sudo"
+                    else PASSWORD_PROMPT_RE.search(second_text) is not None
+                )
+                if prompt_repeated:
+                    await self._cancel_user_transition(session, after_seq=second.next_seq)
+                    raise KoKoProbeError(
+                        "The remote host rejected the supplied user switch password."
+                    )
+                if second.connection_closed:
+                    raise KoKoProbeError(
+                        "The remote terminal closed while switching users."
+                    )
+            elif first.connection_closed:
+                raise KoKoProbeError(
+                    "The remote terminal closed while switching users."
+                )
+        except asyncio.CancelledError:
+            await self._drop_session_if_present(session_handle)
+            await self._close_detached_session(
+                session,
+                close_reason="user_switch_cancelled",
+            )
+            raise
+        finally:
+            await session.terminal.clear_buffered_output(
+                after_seq=before_seq,
+                through_seq=latest_seq,
+            )
+            async with session._lock:
+                session.last_read_seq = max(session.last_read_seq, latest_seq)
+                if not session.closed:
+                    session.finish_command()
+
+    async def _cancel_user_transition(
+        self,
+        session: ManagedTerminalSession,
+        *,
+        after_seq: int,
+    ) -> None:
+        async with session._lock:
+            await session.terminal.send_terminal_data("\u0003")
+            session.touch()
+        await session.terminal.drain_until_idle(
+            after_seq=after_seq,
+            idle_timeout_seconds=0.5,
+            total_timeout_seconds=2.0,
+        )
+
+    async def exit_user(
+        self,
+        session_handle: str,
+        *,
+        settle_timeout_seconds: float = 1.0,
+        total_timeout_seconds: float = 10.0,
+    ) -> dict[str, Any]:
+        before = await self.get_identity(
+            session_handle,
+            settle_timeout_seconds=settle_timeout_seconds,
+            total_timeout_seconds=total_timeout_seconds,
+        )
+        session = await self._require_session(session_handle)
+        async with session._lock:
+            if not session.user_switch_stack:
+                raise KoKoProbeError(
+                    "This session has no MCP-managed user switch to exit."
+                )
+            transition = dict(session.user_switch_stack[-1])
+        expected_current = transition["to_identity"]
+        if before["current_identity"].get("user") != expected_current.get("user"):
+            raise KoKoProbeError(
+                "The current remote identity differs from the MCP-managed user switch stack. "
+                "Inspect it with jms_get_terminal_identity before exiting manually."
+            )
+
+        exited = await self.run_command(
+            session_handle,
+            command="exit",
+            settle_timeout_seconds=settle_timeout_seconds,
+            total_timeout_seconds=total_timeout_seconds,
+        )
+        current_identity = exited.get("current_identity")
+        expected_identity = transition["from_identity"]
+        if not isinstance(current_identity, dict) or current_identity.get(
+            "user"
+        ) != expected_identity.get("user"):
+            raise KoKoProbeError(
+                "The remote shell did not restore the expected previous user after exit."
+            )
+
+        async with session._lock:
+            session.user_switch_stack.pop()
+            snapshot = session.snapshot()
+        LOGGER.info(
+            "Exited one managed user shell in KoKo terminal session %s; current user is %s.",
+            session_handle,
+            current_identity.get("user"),
+        )
+        return {
+            "exited": True,
+            "exited_identity": expected_current,
+            "restored_identity": current_identity,
+            **snapshot,
+        }
 
     async def interrupt_session(
         self,

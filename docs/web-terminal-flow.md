@@ -234,8 +234,8 @@ These points are strong implementation clues, but they are not yet a complete pr
 
 ## Current Implementation Guidance
 
-- Treat interactive terminal support as a second-stage feature, even though the connect chain is now partially mapped.
-- Build and verify the REST and session layers first.
+- Interactive terminal support is implemented through reusable managed KoKo sessions.
+- Keep the REST discovery, authenticated web session, and KoKo session layers independently observable.
 - Treat both the top-level connection-token `value` field and the nested `token.value` field as secrets that must be redacted from normal logs and MCP responses.
 - Preserve the authenticated web-session cookies when a successful login also creates a durable access key, because those cookies are required later for KoKo WebSocket handshakes.
 - Prefer a CLI-emulated web login flow over the bearer-token API for terminal-oriented authentication work.
@@ -250,6 +250,9 @@ These points are strong implementation clues, but they are not yet a complete pr
 - Prefer the following MCP tool split over the older blocking execute/read/write mix:
   - `jms_acquire_terminal_session`
   - `jms_run_terminal_command`
+  - `jms_get_terminal_identity`
+  - `jms_switch_terminal_user`
+  - `jms_exit_terminal_user`
   - `jms_send_terminal_input`
   - `jms_read_terminal_output`
   - `jms_interrupt_terminal_session`

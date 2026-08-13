@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal
 
 from .mcp_compat import create_mcp_server
 from .service import (
@@ -16,10 +16,12 @@ from .service import (
     close_sftp_session_payload,
     close_terminal_session_payload,
     create_connection_token_payload,
+    exit_terminal_user_payload,
     expire_connection_token_payload,
     get_asset_access_payload,
     get_asset_payload,
     get_profile_payload,
+    get_terminal_identity_payload,
     interrupt_terminal_session_payload,
     list_assets_payload,
     list_connect_methods_payload,
@@ -41,6 +43,7 @@ from .service import (
     sftp_rename_payload,
     sftp_stat_payload,
     sftp_upload_payload,
+    switch_terminal_user_payload,
 )
 from .sftp_manager import get_sftp_session_manager
 from .terminal_manager import get_terminal_session_manager
@@ -78,6 +81,8 @@ mcp = create_mcp_server(
         "For terminal work, call jms_terminal_usage_guide first, then prefer "
         "jms_acquire_terminal_session so one shell is reused per target. "
         "Use jms_run_terminal_command for short command execution, "
+        "jms_get_terminal_identity and jms_switch_terminal_user for explicit remote identity management, "
+        "jms_exit_terminal_user to restore the previous remote identity, "
         "jms_send_terminal_input plus jms_read_terminal_output for shell-style interaction, "
         "and jms_interrupt_terminal_session when a command needs to be stopped. "
         "Close managed shells with jms_close_terminal_session when the task is done. "
@@ -296,6 +301,59 @@ async def jms_run_terminal_command(
     return await run_terminal_command_payload(
         session_handle=session_handle,
         command=command,
+        settle_timeout_seconds=settle_timeout_seconds,
+        total_timeout_seconds=total_timeout_seconds,
+    )
+
+
+@mcp.tool()
+async def jms_get_terminal_identity(
+    session_handle: str,
+    settle_timeout_seconds: float = 1.0,
+    total_timeout_seconds: float = 10.0,
+) -> dict[str, Any]:
+    """Verify and return the effective operating-system user in a managed shell."""
+    return await get_terminal_identity_payload(
+        session_handle=session_handle,
+        settle_timeout_seconds=settle_timeout_seconds,
+        total_timeout_seconds=total_timeout_seconds,
+    )
+
+
+@mcp.tool()
+async def jms_switch_terminal_user(
+    session_handle: str,
+    target_user: str,
+    method: Literal["sudo", "su"] = "sudo",
+    password: str = "",
+    settle_timeout_seconds: float = 1.0,
+    total_timeout_seconds: float = 10.0,
+) -> dict[str, Any]:
+    """Switch to a verified remote user within the existing JumpServer shell.
+
+    Use ``sudo`` for sudo-policy authentication and ``su`` for target-account
+    authentication. Supply ``password`` only when the remote host requires it.
+    The MCP client or model may retain that tool argument in its trace history.
+    """
+    return await switch_terminal_user_payload(
+        session_handle=session_handle,
+        target_user=target_user,
+        method=method,
+        password=password,
+        settle_timeout_seconds=settle_timeout_seconds,
+        total_timeout_seconds=total_timeout_seconds,
+    )
+
+
+@mcp.tool()
+async def jms_exit_terminal_user(
+    session_handle: str,
+    settle_timeout_seconds: float = 1.0,
+    total_timeout_seconds: float = 10.0,
+) -> dict[str, Any]:
+    """Exit one MCP-managed user shell and verify restoration of the previous user."""
+    return await exit_terminal_user_payload(
+        session_handle=session_handle,
         settle_timeout_seconds=settle_timeout_seconds,
         total_timeout_seconds=total_timeout_seconds,
     )

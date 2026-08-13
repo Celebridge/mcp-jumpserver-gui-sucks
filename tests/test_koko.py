@@ -6,7 +6,9 @@ from mcp_jumpserver_gui_sucks.config import Settings
 from mcp_jumpserver_gui_sucks.koko import (
     KoKoTerminalSession,
     Transcript,
+    build_exec_script,
     extract_between_markers,
+    extract_terminal_identity,
 )
 
 
@@ -81,6 +83,23 @@ class KoKoEventBufferTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retained[0].text, "ized")
         self.assertEqual(session.buffered_output_bytes(), 4)
 
+    async def test_clear_buffered_output_removes_sensitive_transition_frames(self) -> None:
+        session = self.make_session()
+        await session._record_message(b"before")
+        await session._record_message(b"rotating-")
+        await session._record_message(b"secret")
+        await session._record_message(b"after")
+
+        await session.clear_buffered_output(after_seq=1, through_seq=3)
+        transcript = await session.drain_until_idle(
+            after_seq=0,
+            idle_timeout_seconds=0.001,
+            total_timeout_seconds=0.01,
+        )
+
+        self.assertEqual(transcript.raw_text(), "beforeafter")
+        self.assertEqual(session.buffered_output_bytes(), len(b"beforeafter"))
+
     async def test_transcript_keeps_markers_while_bounding_continuous_output(
         self,
     ) -> None:
@@ -122,6 +141,49 @@ class KoKoEventBufferTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(transcript.buffer_gap)
         self.assertEqual(transcript.dropped_event_count, 1)
         self.assertEqual(transcript.raw_text(), "twothree")
+
+
+class TerminalIdentityProtocolTests(unittest.TestCase):
+    def test_exec_script_reports_identity_without_changing_command_status(self) -> None:
+        script = build_exec_script(
+            "false",
+            "__START__",
+            "__END__",
+            identity_marker="__IDENTITY__",
+            exit_shell=False,
+        )
+
+        self.assertIn("status=$?", script)
+        self.assertIn("__IDENTITY__", script)
+        self.assertLess(script.index("status=$?"), script.index("__IDENTITY__"))
+        self.assertLess(script.index("__IDENTITY__"), script.index("__END__"))
+
+    def test_extract_terminal_identity_removes_protocol_record(self) -> None:
+        identity, cleaned = extract_terminal_identity(
+            "before\n__IDENTITY__\t0\troot\t/root\t/bin/bash\nafter\n",
+            marker="__IDENTITY__",
+        )
+
+        self.assertEqual(
+            identity,
+            {
+                "uid": 0,
+                "user": "root",
+                "home": "/root",
+                "shell": "/bin/bash",
+                "is_root": True,
+            },
+        )
+        self.assertEqual(cleaned, "before\nafter\n")
+
+    def test_extract_terminal_identity_accepts_a_shell_prompt_prefix(self) -> None:
+        identity, cleaned = extract_terminal_identity(
+            "[readonly@host ~]$ __IDENTITY__\t1002\treadonly\t/home/readonly\t/bin/bash\n",
+            marker="__IDENTITY__",
+        )
+
+        self.assertEqual(identity["user"], "readonly")
+        self.assertEqual(cleaned, "[readonly@host ~]$ ")
 
 
 if __name__ == "__main__":

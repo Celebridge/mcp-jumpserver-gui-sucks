@@ -276,6 +276,18 @@ class KoKoTerminalSession:
     def buffered_output_bytes(self) -> int:
         return self._buffered_output_bytes
 
+    async def clear_buffered_output(
+        self,
+        *,
+        after_seq: int,
+        through_seq: int,
+    ) -> None:
+        async with self._condition:
+            for event in self._events:
+                if after_seq < event.seq <= through_seq and event.text:
+                    self._buffered_output_bytes -= self._event_output_bytes(event)
+                    event.text = ""
+
     async def open(self) -> None:
         if not self._auth_state.has_cookie_auth():
             raise KoKoProbeError(
@@ -583,6 +595,7 @@ def build_exec_script(
     start_marker: str,
     end_marker: str,
     *,
+    identity_marker: str = "",
     exit_shell: bool = True,
 ) -> str:
     script = command
@@ -590,12 +603,19 @@ def build_exec_script(
         script = script.lstrip("\n")
     if not script.endswith("\n"):
         script = f"{script}\n"
+    identity_script = ""
+    if identity_marker:
+        identity_script = (
+            f"printf '{identity_marker}\\t%s\\t%s\\t%s\\t%s\\n' "
+            '"$(id -u)" "$(id -un)" "$HOME" "$SHELL"\n'
+        )
     script = (
         "trap 'stty echo' EXIT INT TERM HUP\n"
         "stty -echo\n"
         f"printf '{start_marker}\\n'\n"
         f"{script}"
         "status=$?\n"
+        f"{identity_script}"
         f"printf '\\n{end_marker}:%s\\n' \"$status\"\n"
         "stty echo\n"
         "trap - EXIT INT TERM HUP\n"
@@ -603,6 +623,31 @@ def build_exec_script(
     if exit_shell:
         script += "exit\n"
     return script
+
+
+def extract_terminal_identity(
+    text: str,
+    *,
+    marker: str,
+) -> tuple[dict[str, Any] | None, str]:
+    if not marker:
+        return None, text
+    pattern = re.compile(
+        rf"{re.escape(marker)}\t(\d+)\t([^\t\n]+)\t([^\t\n]*)\t([^\n]*)\n?"
+    )
+    match = pattern.search(text)
+    if match is None:
+        return None, text
+    uid = int(match.group(1))
+    identity = {
+        "uid": uid,
+        "user": match.group(2),
+        "home": match.group(3),
+        "shell": match.group(4),
+        "is_root": uid == 0,
+    }
+    cleaned = f"{text[: match.start()]}{text[match.end() :]}"
+    return identity, cleaned
 
 
 def extract_between_markers(

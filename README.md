@@ -18,6 +18,7 @@ The main CLI and MCP chain is working against a real JumpServer instance:
 - managed shell reuse for repeated command execution against the same asset/account target
 - non-blocking buffered terminal output reads for managed sessions
 - explicit managed-session command interruption with `Ctrl-C`
+- verified effective-user tracking and managed `sudo`/`su` login-shell transitions
 - process-local terminal idle reaping and session-cap enforcement
 - explicit cookie-session refresh probing before terminal work
 - a line-oriented CLI shell for non-MCP interactive terminal use
@@ -115,12 +116,26 @@ When a coding agent plans to work on one machine for more than one command, the 
 
 1. Call `jms_terminal_usage_guide`.
 2. Call `jms_acquire_terminal_session` with `asset_ref` and `account_ref`.
-3. Use `jms_run_terminal_command` for short command-style work.
-4. Use `jms_send_terminal_input` plus `jms_read_terminal_output` for shell-style interaction.
-5. Call `jms_interrupt_terminal_session` when a command needs to be stopped.
-6. Call `jms_close_terminal_session` when the task is complete.
+3. Call `jms_get_terminal_identity` before work where the effective operating-system user matters.
+4. Call `jms_switch_terminal_user` to enter another user's login shell through `sudo` or `su`.
+5. Use `jms_run_terminal_command` for short command-style work. Each result includes the verified current identity.
+6. Use `jms_send_terminal_input` plus `jms_read_terminal_output` for shell-style interaction.
+7. Call `jms_interrupt_terminal_session` when a command needs to be stopped.
+8. Call `jms_exit_terminal_user` to leave one MCP-managed user shell and restore the previous user.
+9. Call `jms_close_terminal_session` when the task is complete.
 
 This keeps one KoKo shell open per target and avoids leaving many short-lived web-shell records behind in JumpServer.
+
+`jms_switch_terminal_user` defaults to passwordless `sudo`. Set `method="su"` for
+target-account authentication, or provide the optional `password` argument when either
+method requires one. The MCP sends the password only after the remote terminal presents
+an authentication prompt, and it excludes the password from command text, results, and
+application logs. MCP clients may retain tool arguments in their own conversation or trace
+history, so treat a supplied password as exposed to the configured MCP client and model.
+
+The managed session records the effective UID, username, home directory, shell, and user-switch
+depth. Prefer the explicit switch and exit tools over manually typing `sudo su`; ordinary command
+execution still refreshes the effective identity so manually initiated transitions remain visible.
 
 ## Recommended Agent SFTP Workflow
 
@@ -288,6 +303,9 @@ After Trusted Publishing is configured once, later pushes to `main` that bump `p
 - `jms_send_terminal_input`
 - `jms_read_terminal_output`
 - `jms_run_terminal_command`
+- `jms_get_terminal_identity`
+- `jms_switch_terminal_user`
+- `jms_exit_terminal_user`
 - `jms_interrupt_terminal_session`
 - `jms_resize_terminal_session`
 - `jms_close_terminal_session`
@@ -313,6 +331,9 @@ After Trusted Publishing is configured once, later pushes to `main` that bump `p
 - `jms_terminal_usage_guide` returns the preferred terminal workflow for coding agents and should be consulted at the start of terminal-heavy work.
 - `jms_acquire_terminal_session` is the preferred high-level entrypoint for repeated work on one machine because it resolves the target and reuses an existing shell when possible.
 - `jms_run_terminal_command` is the preferred path for short command execution on an already acquired `session_handle`.
+- `jms_get_terminal_identity` verifies the effective UID and username before privileged work.
+- `jms_switch_terminal_user` supports passwordless and password-backed `sudo` or `su` transitions while preserving the same JumpServer session.
+- `jms_exit_terminal_user` exits one MCP-managed user shell and verifies that the previous identity was restored.
 - `jms_send_terminal_input` plus `jms_read_terminal_output` are the preferred path for shell-style interaction and incremental polling.
 - `jms_interrupt_terminal_session` is the supported way to stop a running managed-session command without throwing away the shell immediately.
 - `jms_interrupt_terminal_session` accepts `ctrl_c` and the common alias `SIGINT`; both normalize to the same Ctrl+C behavior.

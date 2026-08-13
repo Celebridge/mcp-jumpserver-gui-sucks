@@ -93,14 +93,20 @@ async def build_terminal_usage_guide_payload() -> dict[str, Any]:
             "Call jms_status first when you are unsure whether terminal auth is still valid.",
             "Call jms_terminal_usage_guide once at the start of a terminal-heavy task.",
             "Call jms_acquire_terminal_session with asset_ref and account_ref to get or reuse one managed shell.",
+            "Call jms_get_terminal_identity before privileged work when the current remote user matters.",
+            "Use jms_switch_terminal_user for sudo or su user transitions, including password-backed transitions when required.",
             "Use jms_run_terminal_command for short command-style work on the same machine.",
             "Use jms_send_terminal_input plus jms_read_terminal_output for shell-style interaction.",
             "Use jms_interrupt_terminal_session when a command needs to be stopped.",
+            "Call jms_exit_terminal_user to leave one MCP-managed user shell and restore the previous user.",
             "Call jms_close_terminal_session when the task is complete.",
         ],
         "preferred_tools": {
             "guide": "jms_terminal_usage_guide",
             "acquire": "jms_acquire_terminal_session",
+            "identity": "jms_get_terminal_identity",
+            "switch_user": "jms_switch_terminal_user",
+            "exit_user": "jms_exit_terminal_user",
             "run": "jms_run_terminal_command",
             "send": "jms_send_terminal_input",
             "read": "jms_read_terminal_output",
@@ -110,8 +116,10 @@ async def build_terminal_usage_guide_payload() -> dict[str, Any]:
         "anti_patterns": [
             "Do not repeatedly open new shells for every command on the same target.",
             "Do not leave managed shells idle after a task is complete when you already know the work is done.",
-            "Do not start another command through jms_run_terminal_command while the session still reports command_running.",
-            "Do not use jms_send_terminal_input to push more input into a session that is already command_running.",
+            "Start another command only when the managed session status is idle.",
+            "Send raw terminal input only when the managed session status is idle.",
+            "Prefer jms_switch_terminal_user over manually typing sudo su so the effective identity and switch depth stay explicit.",
+            "Treat the optional user-switch password as sensitive because the MCP client may retain tool arguments.",
         ],
         "defaults": {
             "terminal_idle_timeout_seconds": settings.terminal_idle_timeout_seconds,
@@ -974,6 +982,60 @@ async def run_terminal_command_payload(
     return await manager.run_command(
         session_handle,
         command=command,
+        settle_timeout_seconds=settle_timeout_seconds,
+        total_timeout_seconds=total_timeout_seconds,
+    )
+
+
+async def get_terminal_identity_payload(
+    *,
+    session_handle: str,
+    settle_timeout_seconds: float = 1.0,
+    total_timeout_seconds: float = 10.0,
+) -> dict[str, Any]:
+    settings = Settings.from_env()
+    manager = get_terminal_session_manager()
+    await manager.prepare(settings)
+    return await manager.get_identity(
+        session_handle,
+        settle_timeout_seconds=settle_timeout_seconds,
+        total_timeout_seconds=total_timeout_seconds,
+    )
+
+
+async def switch_terminal_user_payload(
+    *,
+    session_handle: str,
+    target_user: str,
+    method: str = "sudo",
+    password: str = "",
+    settle_timeout_seconds: float = 1.0,
+    total_timeout_seconds: float = 10.0,
+) -> dict[str, Any]:
+    settings = Settings.from_env()
+    manager = get_terminal_session_manager()
+    await manager.prepare(settings)
+    return await manager.switch_user(
+        session_handle,
+        target_user=target_user,
+        method=method,
+        password=password,
+        settle_timeout_seconds=settle_timeout_seconds,
+        total_timeout_seconds=total_timeout_seconds,
+    )
+
+
+async def exit_terminal_user_payload(
+    *,
+    session_handle: str,
+    settle_timeout_seconds: float = 1.0,
+    total_timeout_seconds: float = 10.0,
+) -> dict[str, Any]:
+    settings = Settings.from_env()
+    manager = get_terminal_session_manager()
+    await manager.prepare(settings)
+    return await manager.exit_user(
+        session_handle,
         settle_timeout_seconds=settle_timeout_seconds,
         total_timeout_seconds=total_timeout_seconds,
     )

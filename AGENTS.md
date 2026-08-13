@@ -72,6 +72,13 @@
 - Logs must be sanitized by default and must never print secrets, cookies, tokens, or OTP values.
 - Record meaningful state transitions, branch choices, failure reasons, and high-value server responses. Avoid noisy logs with little diagnostic value.
 
+## Terminal Identity Requirements
+
+- Remote user transitions must reuse the existing managed KoKo terminal session so JumpServer keeps one auditable shell session per asset/account pair.
+- Managed command results must report the verified effective UID, username, home directory, and shell.
+- Explicit `sudo` and `su` transitions must maintain a user-switch stack so one managed exit restores and verifies the previous identity.
+- Password-backed transitions may accept a password directly for operational convenience. Keep the password out of remote command text, MCP results, and application logs, and document that the MCP client may retain tool arguments.
+
 ## SFTP Requirements
 
 - SFTP support must remain 443-only and use KoKo's authenticated elFinder WebSocket and connector flow rather than connecting to an asset's SSH/SFTP port directly.
