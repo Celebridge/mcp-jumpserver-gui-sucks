@@ -11,6 +11,7 @@ from .config import Settings
 from .errors import JumpServerAPIError, JumpServerMCPError
 
 USER_SESSION_API_PATH = "/api/v1/authentication/user-session/"
+PROFILE_API_PATH = "/api/v1/users/profile/"
 COOKIE_REFRESH_WINDOW_SECONDS = 300.0
 
 
@@ -148,28 +149,63 @@ async def refresh_terminal_cookie_session(
                 status_code=response.status_code,
                 detail=detail,
             )
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise JumpServerAPIError(
-                method="GET",
-                path=USER_SESSION_API_PATH,
-                status_code=response.status_code,
-                detail="Expected a JSON response.",
-            ) from exc
+        if response.status_code == 200 and not response.text.strip():
+            # JumpServer v4 该接口对已认证会话返回空 body，改用 profile 接口确认会话有效性
+            probe = await client.get(
+                f"{cookie_only_state.base_url or settings.base_url}{PROFILE_API_PATH}",
+                headers=headers,
+            )
+            if probe.status_code in {401, 403}:
+                raise TerminalSessionRefreshRequiredError(
+                    "The persisted web session for KoKo terminal access has expired or is no longer valid. "
+                    "Re-run the CLI login command to renew it."
+                )
+            if probe.status_code >= 400:
+                raise JumpServerAPIError(
+                    method="GET",
+                    path=PROFILE_API_PATH,
+                    status_code=probe.status_code,
+                    detail=probe.text.strip()[:200],
+                )
+            try:
+                probe_payload = probe.json()
+            except ValueError as exc:
+                raise JumpServerAPIError(
+                    method="GET",
+                    path=PROFILE_API_PATH,
+                    status_code=probe.status_code,
+                    detail="Expected a JSON response.",
+                ) from exc
+            if not isinstance(probe_payload, dict):
+                raise JumpServerAPIError(
+                    method="GET",
+                    path=PROFILE_API_PATH,
+                    status_code=probe.status_code,
+                    detail="Expected a JSON object response.",
+                )
+        else:
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise JumpServerAPIError(
+                    method="GET",
+                    path=USER_SESSION_API_PATH,
+                    status_code=response.status_code,
+                    detail="Expected a JSON response.",
+                ) from exc
 
-        if not isinstance(payload, dict):
-            raise JumpServerAPIError(
-                method="GET",
-                path=USER_SESSION_API_PATH,
-                status_code=response.status_code,
-                detail="Expected a JSON object response.",
-            )
-        if not payload.get("ok"):
-            raise TerminalSessionRefreshRequiredError(
-                "JumpServer did not confirm the persisted terminal web session. "
-                "Re-run the CLI login command to renew it."
-            )
+            if not isinstance(payload, dict):
+                raise JumpServerAPIError(
+                    method="GET",
+                    path=USER_SESSION_API_PATH,
+                    status_code=response.status_code,
+                    detail="Expected a JSON object response.",
+                )
+            if not payload.get("ok"):
+                raise TerminalSessionRefreshRequiredError(
+                    "JumpServer did not confirm the persisted terminal web session. "
+                    "Re-run the CLI login command to renew it."
+                )
 
         refreshed_state = enrich_auth_state_with_cookies(
             auth_state,
