@@ -763,9 +763,18 @@ async def resolve_terminal_tool_target(
         account_ref=account_ref,
         protocol=protocol,
     )
+    # JumpServer v4 的 connection-token 接口要求 account 传用户名/别名，而非账号 UUID。
+    account_summary = resolved["account"]
+    account_value = str(
+        account_summary.get("username")
+        or account_summary.get("alias")
+        or account_summary.get("name")
+        or account_summary.get("id")
+        or ""
+    )
     return (
         str(resolved["asset"]["id"]),
-        str(resolved["account"]["id"]),
+        account_value,
         resolved,
     )
 
