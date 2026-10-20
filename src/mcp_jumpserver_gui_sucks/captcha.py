@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -41,7 +43,9 @@ def fetch_captcha_challenge(client: httpx.Client, html: str) -> CaptchaChallenge
 
 
 def default_captcha_path(captcha_key: str) -> Path:
-    return Path("/private/tmp") / f"jumpserver-captcha-{captcha_key}.png"
+    # Windows 兼容：原实现 Path("/private/tmp") 在 Windows 上会解析为当前盘符根目录下的
+    # \private\tmp，普通用户无写权限会导致 mkdir 抛 PermissionError。改用系统临时目录。
+    return Path(tempfile.gettempdir()) / f"jumpserver-captcha-{captcha_key}.png"
 
 
 def save_captcha_challenge(
@@ -57,6 +61,14 @@ def save_captcha_challenge(
 
 
 def open_captcha_path(path: Path) -> str | None:
+    # Windows 兼容：原实现只会调 macOS 的 open 或 Linux 的 xdg-open，
+    # Windows 上会因找不到 xdg-open 而无法自动打开图片。这里补 win32 分支用 os.startfile。
+    if sys.platform == "win32":
+        try:
+            os.startfile(str(path))
+        except OSError as exc:
+            return f"Failed to open the captcha image: {exc}"
+        return None
     command = ["open", str(path)] if sys.platform == "darwin" else ["xdg-open", str(path)]
     try:
         subprocess.run(command, check=True)
