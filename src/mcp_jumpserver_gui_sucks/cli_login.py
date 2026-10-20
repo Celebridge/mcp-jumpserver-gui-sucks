@@ -353,6 +353,28 @@ class JumpServerCLILogin:
     def check_web_session(self) -> dict[str, Any]:
         LOGGER.info("Checking whether the current cookie jar is a real web session.")
         response = self._client.get(USER_SESSION_API_PATH)
+        LOGGER.info(
+            "[DIAG] user-session status=%s final_url=%s cookies=%s body=%r",
+            response.status_code,
+            str(response.url),
+            sorted(cookie.name for cookie in self._client.cookies.jar),
+            response.text[:200],
+        )
+        if response.status_code == 200 and not response.text.strip():
+            # JumpServer v4 该接口对已认证会话返回空 body，退化为用 profile 接口判断会话是否生效。
+            LOGGER.info("user-session returned an empty body; probing the profile endpoint instead.")
+            probe = self._client.get(PROFILE_API_PATH)
+            LOGGER.info(
+                "[DIAG] profile probe status=%s final_url=%s body=%r",
+                probe.status_code,
+                str(probe.url),
+                probe.text[:200],
+            )
+            raise_for_unexpected_status(probe, {200})
+            probe_payload = extract_response_json(probe)
+            if not isinstance(probe_payload, dict):
+                raise LoginFlowError("The profile endpoint returned a non-object payload.")
+            return {"ok": True, "username": probe_payload.get("username", "")}
         raise_for_unexpected_status(response, {200})
         payload = extract_response_json(response)
         if not isinstance(payload, dict):
@@ -377,12 +399,19 @@ class JumpServerCLILogin:
         for _ in range(6):
             parsed = urlparse(location)
             path = parsed.path or "/"
+            LOGGER.info("[DIAG] web-session redirect location=%s", location)
             if path.startswith(LOGIN_GUARD_PATH):
                 LOGGER.info("Following the JumpServer login guard.")
                 response = self._client.get(
                     location,
                     headers=self._form_headers(LOGIN_PAGE_PATH),
                     follow_redirects=False,
+                )
+                LOGGER.info(
+                    "[DIAG] guard GET status=%s set-cookie=%s location=%s",
+                    response.status_code,
+                    response.headers.get("set-cookie", ""),
+                    response.headers.get("location", ""),
                 )
                 raise_for_unexpected_status(response, {302})
                 location = self._normalize_location(response.headers.get("location", ""))
@@ -408,6 +437,19 @@ class JumpServerCLILogin:
                     raise LoginFlowError(
                         f"JumpServer redirected the web login back to the login page: {location}"
                     )
+                # 模拟浏览器访问登录后的落地页，确保会话完成激活
+                try:
+                    landing = self._client.get(
+                        location,
+                        headers=self._form_headers(LOGIN_PAGE_PATH),
+                    )
+                    LOGGER.info(
+                        "[DIAG] landing GET status=%s final_url=%s",
+                        landing.status_code,
+                        str(landing.url),
+                    )
+                except Exception as exc:
+                    LOGGER.info("[DIAG] landing GET failed: %s", exc)
                 return self.check_web_session()
 
             if path.startswith(LOGIN_MFA_PAGE_PATH):
@@ -524,6 +566,7 @@ class JumpServerCLILogin:
         secret_key: str = "",
     ) -> None:
         LOGGER.info("Completing confirmation through backend %s.", confirm_type)
+        self._csrf_token()  # 使用当前 cookie 中的最新 CSRF token，避免 403
         headers: dict[str, str] = {}
         if bearer_token:
             headers["Authorization"] = f"{bearer_keyword} {bearer_token}"
@@ -553,6 +596,7 @@ class JumpServerCLILogin:
         ip_group: list[str] | None = None,
     ) -> dict[str, Any]:
         LOGGER.info("Creating a durable JumpServer access key.")
+        self._csrf_token()  # 使用当前 cookie 中的最新 CSRF token，避免 403
         headers: dict[str, str] = {}
         if bearer_token:
             headers["Authorization"] = f"{bearer_keyword} {bearer_token}"
